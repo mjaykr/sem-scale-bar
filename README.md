@@ -6,9 +6,11 @@ Automatically detects the info panel at the bottom of SEM micrographs, reads the
 
 | Input | Output |
 |-------|--------|
-| SEM image with info panel | Cropped image with clean scale bar overlay |
+| `examples/0001.png` | `examples/processed/0001.png` |
+| `examples/0001_040.png` | `examples/processed/0001_040.png` |
+| `examples/0001_080.png` | `examples/processed/0001_080.png` |
 
-See the `examples/` folder for sample input images.
+The `examples/` folder contains 3 sample SEM images and their processed output for reference.
 
 ## Prerequisites
 
