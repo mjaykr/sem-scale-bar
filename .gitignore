@@ -1,0 +1,19 @@
+# Output
+processed/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Debug files
+debug_*.png
+latex_test.png
+scalebar_check.png
+
+# OS
+.DS_Store
+Thumbs.db

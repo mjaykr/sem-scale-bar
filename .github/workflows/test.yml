@@ -1,0 +1,34 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Tesseract
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr
+
+      - name: Install Times New Roman
+        run: sudo apt-get install -y ttf-mscorefonts-installer
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Test import
+        run: python -c "import process_sem_images; print('Import OK')"
+
+      - name: Test font detection
+        run: python -c "from process_sem_images import get_font_path; print(f'Font: {get_font_path()}')"
