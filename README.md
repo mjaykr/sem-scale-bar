@@ -18,11 +18,21 @@ The `examples/` folder contains 3 sample SEM images and their processed output f
 
 The script uses Tesseract to read scale bar labels from SEM images.
 
-**Windows:**
-```bash
-winget install UB-Mannheim.TesseractOCR
+**Windows (via Scoop):**
+
+[Scoop](https://scoop.sh) is a command-line package manager for Windows. It installs software to your user directory (no admin rights needed) and adds them to PATH automatically.
+
+To get started with Scoop, open PowerShell and run:
+```powershell
+Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+irm get.scoop.sh | iex
 ```
-> The script auto-detects Tesseract from PATH or `C:\Program Files\Tesseract-OCR\`.
+
+Then install Tesseract:
+```powershell
+scoop install tesseract
+```
+> The script auto-detects Tesseract from PATH (Scoop adds it automatically).
 
 **macOS:**
 ```bash
