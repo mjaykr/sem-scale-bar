@@ -27,27 +27,73 @@ if tesseract_path:
     pytesseract.pytesseract.tesseract_cmd = tesseract_path
 
 
+def _normalise_to_uint8(arr):
+    """Normalise any numeric array (int16/32/64, uint16/32, float) to uint8.
+
+    Strategy: use the data's bit-depth/dynamic range when available (robust for
+    images that have very few bright or dark pixels), otherwise fall back to a
+    1st/99th percentile stretch so a single outlier cannot ruin the scaling.
+    """
+    arr = np.asarray(arr)
+    if arr.size == 0:
+        return arr.astype(np.uint8)
+
+    if arr.dtype == np.uint8:
+        return arr.astype(np.uint8)
+
+    if np.issubdtype(arr.dtype, np.integer):
+        info = np.iinfo(arr.dtype)
+        lo, hi = float(info.min), float(info.max)
+    else:
+        lo, hi = float(arr.min()), float(arr.max())
+
+    if hi <= lo:
+        return np.zeros(arr.shape, dtype=np.uint8)
+
+    # If the actual data occupies only a small fraction of the dtype's range
+    # (common with 16-bit SEM data), stretch using the observed percentiles so
+    # the contrast is recovered instead of looking washed out.
+    p_low, p_high = np.percentile(arr, [1, 99])
+    if p_high - p_low > 0.02 * (hi - lo):
+        lo, hi = float(p_low), float(p_high)
+
+    scaled = (arr.astype(np.float32) - lo) / (hi - lo) * 255.0
+    return scaled.clip(0, 255).astype(np.uint8)
+
+
 def load_image_as_gray(path):
     """Load an image file and return a uint8 grayscale numpy array.
 
     Uses PIL first (handles 16-bit TIFF, multi-page TIFF, and exotic formats
-    better than OpenCV), then falls back to cv2.  Handles L, I;16, RGB, RGBA
-    modes and normalises everything to uint8 [0..255].
+    better than OpenCV), then falls back to cv2.  Handles L, I;16, I, RGB, RGBA,
+    float and 16/32-bit integer modes and normalises everything to uint8
+    [0..255] without crushing the contrast.
     """
     try:
         pil_img = Image.open(path)
         if hasattr(pil_img, 'n_frames') and pil_img.n_frames > 1:
+            # Prefer the first non-empty frame if the image is multi-page.
             pil_img.seek(0)
-        if pil_img.mode not in ('L',):
+
+        # 16/32-bit integer and float modes: PIL's convert('L') clamps these to
+        # a solid value (e.g. all 255 for I;16), so normalise through numpy.
+        if pil_img.mode not in ('L', 'LA', 'P', 'RGB', 'RGBA'):
+            raw = np.array(pil_img)
+            return _normalise_to_uint8(raw)
+
+        if pil_img.mode in ('LA', 'RGBA'):
+            pil_img = pil_img.convert('RGB')
+
+        if pil_img.mode == 'P':
+            pil_img = pil_img.convert('RGB')
+
+        if pil_img.mode != 'L':
             pil_img = pil_img.convert('L')
+
         arr = np.array(pil_img)
-        if arr.dtype == np.uint16:
-            arr = (arr >> 8).astype(np.uint8)
-        elif arr.dtype in (np.float32, np.float64):
-            arr = (arr * 255).clip(0, 255).astype(np.uint8)
-        elif arr.dtype == np.uint32:
-            arr = (arr >> 24).astype(np.uint8)
-        return arr
+        if arr.dtype == np.uint8:
+            return arr
+        return _normalise_to_uint8(arr)
     except Exception:
         pass
 
@@ -56,16 +102,16 @@ def load_image_as_gray(path):
         return None
 
     if bgr.ndim == 3:
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        if bgr.shape[2] == 4:
+            gray = cv2.cvtColor(bgr, cv2.COLOR_BGRA2GRAY)
+        else:
+            gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     else:
         gray = bgr
 
-    if gray.dtype == np.uint16:
-        gray = (gray >> 8).astype(np.uint8)
-    elif gray.dtype in (np.float32, np.float64):
-        gray = (gray * 255).clip(0, 255).astype(np.uint8)
-
-    return gray
+    if gray.dtype == np.uint8:
+        return gray
+    return _normalise_to_uint8(gray)
 
 
 def _find_separator_lines(gray):
@@ -112,12 +158,76 @@ def _find_separator_lines(gray):
     return merged
 
 
+def _find_constant_band(gray):
+    """Detect a roughly uniform-color horizontal band near the bottom.
+
+    Many SEM info panels are a solid (often black or white) strip whose rows
+    are nearly constant and clearly different from the image above.  Returns
+    (start_row, end_row) or (None, None).
+    """
+    h, w = gray.shape
+    if h < 20 or w < 20:
+        return None, None
+
+    # Per-row statistics.  Use the whole-row std so that a row is flagged
+    # "uniform" only when it is genuinely constant across its width (robust to
+    # the separator line near the panel edge, which would otherwise inflate a
+    # windowed std).
+    row_means = np.array([gray[y, :].mean() for y in range(h)])
+    row_stds = np.array([gray[y, :].std() for y in range(h)])
+
+    search_start = int(h * 0.45)
+    # A candidate panel row is one that is locally very uniform.
+    uniform = row_stds[search_start:] < max(10, row_stds[search_start:].mean())
+    if not uniform.any():
+        return None, None
+
+    # Group consecutive uniform rows into bands.
+    bands = []
+    start = None
+    for i, y in enumerate(range(search_start, h)):
+        if uniform[i] and start is None:
+            start = y
+        elif not uniform[i] and start is not None:
+            bands.append((start, y - 1))
+            start = None
+    if start is not None:
+        bands.append((start, h - 1))
+
+    # Merge bands separated by only a few non-uniform rows (e.g. a separator
+    # line or a row of text) so a panel is not fragmented.
+    merged = []
+    for s, e in bands:
+        if merged and s - merged[-1][1] <= 5:
+            merged[-1] = (merged[-1][0], e)
+        else:
+            merged.append((s, e))
+    bands = merged
+
+    best = None
+    for s, e in bands:
+        if e - s < 15:
+            continue
+        band_mean = row_means[s:e + 1].mean()
+        # Compare against the region just above the band.
+        above = row_means[max(0, s - (e - s)):s]
+        above_mean = above.mean() if len(above) else band_mean
+        if abs(band_mean - above_mean) > 15:
+            if best is None or (e - s) > (best[1] - best[0]):
+                best = (s, e)
+    if best is None:
+        return None, None
+    # Trim a couple of rows of slack so we don't clip the separating line.
+    return max(0, best[0] - 1), min(h - 1, best[1] + 1)
+
+
 def find_info_panel(gray):
     """Detect the info panel boundaries at the bottom of the SEM image.
 
     Tries bright separator lines first (classic white lines on dark background),
     then dark separator lines (dark lines on lighter background, common in some
-    FEI/Thermo Fisher SEMs).  Falls back to a gradient-based heuristic.
+    FEI/Thermo Fisher SEMs), then a constant-color-band heuristic, and finally a
+    gradient-based heuristic.
     """
     h, w = gray.shape
 
@@ -140,6 +250,10 @@ def find_info_panel(gray):
         if panel_end > panel_start:
             return panel_start, panel_end
 
+    band_start, band_end = _find_constant_band(gray)
+    if band_start is not None and band_end - band_start > 15:
+        return band_start, band_end
+
     row_means = np.array([np.mean(gray[y, :]) for y in range(h)])
     search_start = int(h * 0.6)
 
@@ -154,39 +268,56 @@ def find_info_panel(gray):
 
 
 def find_scale_bar_line(gray, panel_start, panel_end):
-    """Find the scale bar line (horizontal bright segment) inside the info panel.
+    """Find the scale bar line (horizontal segment) inside the info panel.
 
     Works with adaptive thresholding: determines the panel's brightness
-    distribution and looks for segments that are significantly brighter
-    than the panel background.
+    distribution and looks for long horizontal segments that are significantly
+    brighter (or darker) than the panel background.  Handles both light-on-dark
+    and dark-on-light panels, and excludes the panel's own border/separator
+    rows so the bar (an interior segment with side margins) is returned.
     """
     h, w = gray.shape
     panel = gray[panel_start:panel_end, :]
     panel_bg = np.median(panel)
 
+    # Thresholds relative to the panel background.  For a light-on-dark panel
+    # the bar is brighter than the (dark) background; for a dark-on-light panel
+    # it is darker than the (light) background.  The bright branch uses the
+    # original, well-tested formula; the dark branch mirrors it for inverted
+    # panels.
     if panel_bg > 180:
         bright_thresh = min(panel_bg - 20, 220)
+        dark_thresh = panel_bg - 40
     else:
         bright_thresh = max(panel_bg + 40, 200)
+        dark_thresh = max(panel_bg - 40, 35)
+
+    # A real scale bar spans a meaningful fraction of the width but leaves a
+    # margin on at least one side (so it never touches both image edges).
+    min_len = max(15, int(w * 0.02))
+    max_len = int(w * 0.98)
+
+    # Ignore rows that are part of the panel's own top/bottom border.
+    row_margin = max(2, (panel_end - panel_start) // 20)
 
     candidates = []
-    for y in range(panel_start + 1, panel_end):
+    for y in range(panel_start + row_margin, panel_end - row_margin + 1):
         row = gray[y, :]
-        bright = row > bright_thresh
+        for thresh, polarity in ((bright_thresh, 1), (dark_thresh, -1)):
+            seg = row > thresh if polarity == 1 else row < thresh
 
-        changes = np.diff(bright.astype(np.int8))
-        starts = np.where(changes == 1)[0] + 1
-        ends = np.where(changes == -1)[0] + 1
+            changes = np.diff(seg.astype(np.int8))
+            starts = np.where(changes == 1)[0] + 1
+            ends = np.where(changes == -1)[0] + 1
+            if seg[0]:
+                starts = np.concatenate([[0], starts])
+            if seg[-1]:
+                ends = np.concatenate([ends, [w]])
 
-        if bright[0]:
-            starts = np.concatenate([[0], starts])
-        if bright[-1]:
-            ends = np.concatenate([ends, [w]])
-
-        for s, e in zip(starts, ends):
-            length = e - s
-            if 30 < length < w - 100:
-                candidates.append((y, int(s), int(e), int(length)))
+            for s, e in zip(starts, ends):
+                length = e - s
+                if min_len < length < max_len:
+                    candidates.append((y, int(s), int(e), int(length)))
 
     if not candidates:
         return None
@@ -512,16 +643,29 @@ def process_image(input_path, output_path):
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(
+        description='Crop SEM info panels and overlay a clean scale bar.')
+    parser.add_argument('--input', '-i', default=None,
+                        help='Input directory of SEM images (default: script dir).')
+    parser.add_argument('--output', '-o', default=None,
+                        help='Output directory (default: <input>/processed).')
+    args = parser.parse_args()
+
     script_dir = Path(__file__).parent
-    input_dir = script_dir
-    output_dir = script_dir / 'processed'
-    output_dir.mkdir(exist_ok=True)
+    input_dir = Path(args.input) if args.input else script_dir
+    output_dir = Path(args.output) if args.output else (input_dir / 'processed')
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if not input_dir.is_dir():
+        print(f'Input directory does not exist: {input_dir}')
+        return
 
     input_files = sorted(
         f for f in input_dir.iterdir()
-        if f.suffix.lower() in ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp', '.webp')
+        if f.is_file() and f.suffix.lower() in ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp', '.webp')
     )
-    input_files = [f for f in input_files if 'processed' not in str(f)]
+    input_files = [f for f in input_files if 'processed' not in str(f).lower()]
 
     if not input_files:
         print('No image files found (png, jpg, tif).')

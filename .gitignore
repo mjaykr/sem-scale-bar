@@ -17,3 +17,7 @@ scalebar_check.png
 # OS
 .DS_Store
 Thumbs.db
+
+# Local test sandbox
+test/
+
