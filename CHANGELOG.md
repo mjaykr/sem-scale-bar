@@ -23,6 +23,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `_binarise_for_ocr(region, upscale)`: Multi-strategy OCR binarization with automatic polarity selection.
 - `_close(val, value_m, tol)`: Helper to compare OCR-parsed numeric values against known physical values across unit scales.
 - Expanded file format support: `.bmp`, `.webp` in addition to `.png`, `.jpg`, `.jpeg`, `.tif`, `.tiff`.
+- `_normalise_to_uint8(arr)`: Bit-depth/percentile-based normalizer for 8/16/32-bit integer and float arrays.
+- `_find_constant_band(gray)`: Constant-color-band fallback for detecting info panels without separator lines.
+- `--input` / `--output` CLI arguments so any directory can be processed (defaults unchanged).
+
+### Fixed
+
+- **16-bit TIFF decode**: `I;16` images were decoded to solid white by PIL's `convert('L')`; now normalized through numpy via `_normalise_to_uint8()`. This was the root cause of "No info panel found" on 16-bit SEM TIFFs.
+- **Scale bar polarity**: `find_scale_bar_line()` now detects both bright-on-dark and dark-on-light scale bars (previously bright-only), and excludes the panel's own border rows.
+- **Info panel fallback**: Added constant-color-band detection so panels without clear separator lines are still found.
 
 ## [1.0.0] - 2026-07-15
 
