@@ -347,11 +347,11 @@ def find_scale_bar_line(gray, panel_start, panel_end):
 
 
 def _binarise_for_ocr(region, upscale=4):
-    """Binarise a region for OCR, trying both polarities.
+    """Binarise a region for OCR, trying both polarities and preprocessing.
 
-    SEM panels may have dark-on-light or light-on-dark text.  We try both
-    inversions plus Otsu thresholding and pick whichever yields more
-    alphabetic characters (a rough proxy for successful OCR).
+    SEM panels may have dark-on-light or light-on-dark text.  We try
+    Otsu, CLAHE-enhanced, and denoised variants in both polarities and
+    pick whichever yields the most alphabetic characters.
     """
     if region.size == 0:
         return np.zeros((1, 1), dtype=np.uint8)
@@ -359,30 +359,43 @@ def _binarise_for_ocr(region, upscale=4):
     large = cv2.resize(region, (region.shape[1] * upscale, region.shape[0] * upscale),
                        interpolation=cv2.INTER_CUBIC)
 
+    denoised = cv2.GaussianBlur(large, (3, 3), 0)
+
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(denoised)
+
     bg_mean = np.mean(region)
     candidates = []
 
-    _, bin_direct = cv2.threshold(large, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    _, bin_direct = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     candidates.append(bin_direct)
 
-    inv_large = 255 - large
-    _, bin_inv = cv2.threshold(inv_large, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    inv_denoised = 255 - denoised
+    _, bin_inv = cv2.threshold(inv_denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     candidates.append(bin_inv)
 
+    _, bin_clahe = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    candidates.append(bin_clahe)
+
+    inv_enhanced = 255 - enhanced
+    _, bin_clahe_inv = cv2.threshold(inv_enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    candidates.append(bin_clahe_inv)
+
     fixed_thresh = int(bg_mean + (255 - bg_mean) * 0.5) if bg_mean > 128 else 100
-    _, bin_fixed = cv2.threshold(large, fixed_thresh, 255, cv2.THRESH_BINARY)
+    _, bin_fixed = cv2.threshold(denoised, fixed_thresh, 255, cv2.THRESH_BINARY)
     candidates.append(bin_fixed)
-    _, bin_fixed_inv = cv2.threshold(inv_large, fixed_thresh, 255, cv2.THRESH_BINARY)
+    _, bin_fixed_inv = cv2.threshold(inv_denoised, fixed_thresh, 255, cv2.THRESH_BINARY)
     candidates.append(bin_fixed_inv)
 
     best = candidates[0]
     best_score = 0
     for c in candidates:
-        txt = pytesseract.image_to_string(c, config='--psm 7')
-        alpha = sum(ch.isalpha() for ch in txt)
-        if alpha > best_score:
-            best_score = alpha
-            best = c
+        for psm in ('--psm 7', '--psm 6'):
+            txt = pytesseract.image_to_string(c, config=psm)
+            alpha = sum(ch.isalpha() for ch in txt)
+            if alpha > best_score:
+                best_score = alpha
+                best = c
 
     return best
 
@@ -564,45 +577,85 @@ def process_image(input_path, output_path):
     hfw_m = None
     hfw_match = None
 
+    def _parse_unit(m):
+        val = float(m.group(1))
+        unit_text = m.group(2).lower().replace('\u00b5', 'u')
+        if 'nm' in unit_text:
+            return val * 1e-9
+        elif 'mm' in unit_text:
+            return val * 1e-3
+        else:
+            return val * 1e-6
+
+    nice_values = [
+        100e-9, 200e-9, 500e-9,
+        1e-6, 2e-6, 5e-6,
+        10e-6, 20e-6, 50e-6, 100e-6,
+    ]
+
+    def _bar_px_for_hfw(hfw):
+        if hfw and hfw > 0:
+            return int((value_m or 0) * w / hfw) if value_m else None
+        return None
+
+    def _hfw_score(hfw):
+        if value_m is None or hfw is None or hfw <= 0:
+            return 0
+        bar_px = value_m * w / hfw
+        if bar_px < 1 or bar_px > w:
+            return 0
+        diffs = [abs(bar_px - nv * w / hfw) for nv in nice_values]
+        return -min(diffs) if diffs else 0
+
+    hfw_candidates = []
+
     hfw_prefix_matches = list(re.finditer(
-        r'HFW[\s:\-=]+=?\s*([\d.]+)\s*(pm|ym|um|µm|mm|nm)', text_flat, re.IGNORECASE))
+        r'HFW[\s:\-=]+=?\s*([\d.]+)\s*(pm|ym|um|\u00b5m|mm|nm)', text_flat, re.IGNORECASE))
     if hfw_prefix_matches:
         non_label = [m for m in hfw_prefix_matches
                      if value_m is None or not _close(float(m.group(1)), value_m)]
-        if non_label:
-            hfw_match = max(non_label, key=lambda m: float(m.group(1)))
-        else:
-            hfw_match = max(hfw_prefix_matches, key=lambda m: float(m.group(1)))
+        for m in non_label:
+            hfw_candidates.append(_parse_unit(m))
+        if not hfw_candidates and value_m is None:
+            for m in hfw_prefix_matches:
+                hfw_candidates.append(_parse_unit(m))
 
-    if not hfw_match:
-        eq_match = re.search(r'=\s*([\d.]+)\s*(pm|ym|um|µm|mm|nm)\b', text_flat, re.IGNORECASE)
-        if eq_match:
-            hfw_match = eq_match
+    if not hfw_candidates:
+        eq_match = re.search(r'=\s*([\d.]+)\s*(pm|ym|um|\u00b5m|mm|nm)\b', text_flat, re.IGNORECASE)
+        if eq_match and (value_m is None or not _close(float(eq_match.group(1)), value_m)):
+            hfw_candidates.append(_parse_unit(eq_match))
 
-    if not hfw_match:
-        all_unit = list(re.finditer(r'([\d.]+)\s*(pm|ym|um|µm|mm|nm)\b', text_flat))
+    if not hfw_candidates:
+        all_unit = list(re.finditer(r'([\d.]+)\s*(pm|ym|um|\u00b5m|mm|nm)\b', text_flat))
         if value_m is not None:
             non_label = [m for m in all_unit
                          if not _close(float(m.group(1)), value_m)]
         else:
             non_label = list(all_unit)
-        if non_label:
-            unit_priority = {'pm': 0, 'nm': 1, 'um': 2, 'µm': 2, 'ym': 3, 'mm': 4}
-            hfw_match = max(non_label,
-                            key=lambda m: (-unit_priority.get(m.group(2).lower(), 5),
-                                           float(m.group(1))))
-        if not hfw_match and all_unit:
-            hfw_match = all_unit[0]
+        unit_priority = {'pm': 0, 'nm': 1, 'um': 2, '\u00b5m': 2, 'ym': 3, 'mm': 4}
+        non_label_sorted = sorted(non_label,
+                                  key=lambda m: (-unit_priority.get(m.group(2).lower(), 5),
+                                                 float(m.group(1))))
+        for m in non_label_sorted:
+            hfw_candidates.append(_parse_unit(m))
 
-    if hfw_match:
-        val = float(hfw_match.group(1))
-        unit_text = hfw_match.group(2).lower().replace('µ', 'u')
-        if 'nm' in unit_text:
-            hfw_m = val * 1e-9
-        elif 'mm' in unit_text:
-            hfw_m = val * 1e-3
-        else:
-            hfw_m = val * 1e-6
+    if hfw_candidates:
+        if value_m is not None and scale_bar:
+            bar_actual = scale_bar['width_px']
+            best = None
+            for h in hfw_candidates:
+                predicted = value_m * w / h
+                if predicted < 1 or predicted > w:
+                    continue
+                ratio = bar_actual / predicted
+                if 0.3 < ratio < 3.0:
+                    score = -abs(ratio - 1.0)
+                    if best is None or score > best[0]:
+                        best = (score, h)
+            if best:
+                hfw_m = best[1]
+        if hfw_m is None and hfw_candidates:
+            hfw_m = hfw_candidates[0]
 
     if value_m is None and hfw_m and scale_bar:
         px_per_m = w / hfw_m

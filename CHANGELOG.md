@@ -15,6 +15,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Scale bar line detection**: Threshold now adapts to panel background brightness instead of hardcoded `> 200`. Uses panel median to derive appropriate brightness threshold.
 - **HFW regex matching**: Handles OCR artifacts (non-breaking spaces `\xa0`, em dashes `\u2014`), cleans non-ASCII characters before parsing, supports `HFW -`, `HFW =`, `HFW:` separators. Uses case-sensitive unit matching to prevent "PM" (time) from matching "pm" (picometers). Prioritizes um/nm over mm for HFW values. Excludes scale label value from HFW candidates to avoid confusion when OCR merges header and data rows.
 - **process_image pipeline**: Uses robust `load_image_as_gray()` and `cv2.cvtColor(GRAY2BGR)` instead of raw `cv2.imread()` + `cv2.cvtColor(BGR2GRAY)`.
+- **HFW fallback logic**: When all HFW prefix matches equal the scale label value (OCR garbled the real HFW), the old code fell back to using the label as HFW, producing a nonsensical pixels-per-meter ratio. Now skips prefix matches that only contain the label and searches equation/all-unit candidates instead.
+- **HFW cross-validation**: When both a scale label and HFW candidate are found, the bar pixel width is now validated against nice round scale values (1, 2, 5 x powers of 10). The HFW candidate that produces the best match is selected, preventing garbled OCR values from producing wrong bar sizes.
+- **OCR preprocessing**: Added Gaussian denoising and CLAHE (contrast-limited adaptive histogram equalization) to `_binarise_for_ocr()`. Now tries both `--psm 7` (single line) and `--psm 6` (block of text) Tesseract modes, improving accuracy on low-contrast SEM panels.
 
 ### Added
 
