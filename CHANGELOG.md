@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased] - 2026-07-17
 
+### Added
+
+- **`--folder-profile` flag**: Analyzes the first image fully, then reuses its panel geometry, separator polarity, and scale metadata for all subsequent same-shape images in the folder. Much faster when all images come from the same microscope at the same magnification. Falls back to full analysis for images with different dimensions.
+
 ### Fixed
 
 - **Image loading**: Added `load_image_as_gray()` with PIL-first approach that handles 16-bit TIFF, multi-page TIFF, uint32, float32/float64, and exotic formats. Falls back to OpenCV with full bit-depth normalization. Previously only `cv2.imread()` was used, which fails on many TIFF variants.

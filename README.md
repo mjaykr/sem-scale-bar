@@ -72,6 +72,21 @@ pip install .
    ```
 4. Processed images are saved in the `processed/` subfolder
 
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--input` / `-i` | Input directory (default: script dir) |
+| `--output` / `-o` | Output directory (default: `<input>/processed`) |
+| `--no-cache` | Disable adaptive OCR caching, fully analyze every image |
+| `--folder-profile` | Analyze the first image fully, then reuse its panel geometry and scale metadata for all same-shape images. Much faster when all images come from the same microscope at the same magnification |
+
+### Example: same-microscope batch
+
+```bash
+python process_sem_images.py --input "G:/Shared drives/Data/SEM Images/Zr doped" --folder-profile
+```
+
 ## How It Works
 
 1. **Panel detection** — finds the white separator lines above and below the info panel

@@ -11,6 +11,7 @@ import re
 import sys
 import shutil
 import platform
+import hashlib
 import cv2
 import numpy as np
 import pytesseract
@@ -122,7 +123,7 @@ def _find_separator_lines(gray):
     its neighbours (local outlier in the column-wise mean profile).
     """
     h, w = gray.shape
-    row_means = np.array([np.mean(gray[y, :]) for y in range(h)])
+    row_means = gray.mean(axis=1)
 
     search_start = int(h * 0.6)
     row_means_trimmed = row_means[search_start:]
@@ -173,8 +174,8 @@ def _find_constant_band(gray):
     # "uniform" only when it is genuinely constant across its width (robust to
     # the separator line near the panel edge, which would otherwise inflate a
     # windowed std).
-    row_means = np.array([gray[y, :].mean() for y in range(h)])
-    row_stds = np.array([gray[y, :].std() for y in range(h)])
+    row_means = gray.mean(axis=1)
+    row_stds = gray.std(axis=1)
 
     search_start = int(h * 0.45)
     # A candidate panel row is one that is locally very uniform.
@@ -254,7 +255,7 @@ def find_info_panel(gray):
     if band_start is not None and band_end - band_start > 15:
         return band_start, band_end
 
-    row_means = np.array([np.mean(gray[y, :]) for y in range(h)])
+    row_means = gray.mean(axis=1)
     search_start = int(h * 0.6)
 
     grad = np.diff(row_means[search_start:])
@@ -344,6 +345,26 @@ def find_scale_bar_line(gray, panel_start, panel_end):
         }
 
     return None
+
+
+def magnification_cache_key(gray, panel_start, panel_end, scale_bar):
+    """Build a conservative key for repeated microscope panel metadata."""
+    h, w = gray.shape
+    label = gray[panel_start:min(panel_start + 40, h), int(w * 0.3):int(w * 0.98)]
+    if label.size:
+        small = cv2.resize(label, (32, 8), interpolation=cv2.INTER_AREA)
+        small = (small // 16).astype(np.uint8)
+        fingerprint = hashlib.blake2b(small.tobytes(), digest_size=8).digest()
+    else:
+        fingerprint = b''
+    return (
+        gray.shape,
+        round(panel_start / h, 3),
+        round(panel_end / h, 3),
+        round(scale_bar['left'] / w, 3),
+        round(scale_bar['right'] / w, 3),
+        fingerprint,
+    )
 
 
 def _binarise_for_ocr(region, upscale=4):
@@ -477,6 +498,22 @@ def get_font_path():
     )
 
 
+def _save_publication_png(img, output_path, max_width=2480):
+    """Save a grayscale image as a publication-ready PNG.
+
+    - Caps width at max_width (A4 at 300 dpi) without upscaling.
+    - Embeds 300 dpi metadata.
+    - Preserves aspect ratio.
+    """
+    h, w = img.shape[:2]
+    if w > max_width:
+        scale = max_width / w
+        new_h = int(h * scale)
+        img = cv2.resize(img, (max_width, new_h), interpolation=cv2.INTER_LANCZOS4)
+    pil_img = Image.fromarray(img)
+    pil_img.save(output_path, dpi=(300, 300))
+
+
 def draw_scale_bar_on_image(img, bar_length_px, value_m, label):
     """Draw a scale bar overlaid on the bottom-right of the image.
 
@@ -524,18 +561,18 @@ def draw_scale_bar_on_image(img, bar_length_px, value_m, label):
     bg_left = max(0, min(bar_x1, text_x) - pad)
     bg_right = min(w, max(bar_x2, text_x + tw) + pad)
 
-    cv2.rectangle(img, (int(bg_left), int(bg_top)), (int(bg_right), int(bg_bottom)), (255, 255, 255), -1)
-    cv2.rectangle(img, (int(bg_left), int(bg_top)), (int(bg_right), int(bg_bottom)), (0, 0, 0), 1)
+    cv2.rectangle(img, (int(bg_left), int(bg_top)), (int(bg_right), int(bg_bottom)), 255, -1)
+    cv2.rectangle(img, (int(bg_left), int(bg_top)), (int(bg_right), int(bg_bottom)), 0, 1)
 
-    cv2.line(img, (bar_x1, bar_y), (bar_x2, bar_y), (0, 0, 0), bar_thickness)
+    cv2.line(img, (bar_x1, bar_y), (bar_x2, bar_y), 0, bar_thickness)
 
     tick_h = bar_thickness + 4
-    cv2.line(img, (bar_x1, bar_y - tick_h // 2), (bar_x1, bar_y + tick_h // 2), (0, 0, 0), 2)
-    cv2.line(img, (bar_x2, bar_y - tick_h // 2), (bar_x2, bar_y + tick_h // 2), (0, 0, 0), 2)
+    cv2.line(img, (bar_x1, bar_y - tick_h // 2), (bar_x1, bar_y + tick_h // 2), 0, 2)
+    cv2.line(img, (bar_x2, bar_y - tick_h // 2), (bar_x2, bar_y + tick_h // 2), 0, 2)
 
-    pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-    ImageDraw.Draw(pil_img).text((text_x, text_y), display_label, fill=(0, 0, 0), font=pil_font)
-    cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR, dst=img)
+    pil_img = Image.fromarray(img)
+    ImageDraw.Draw(pil_img).text((text_x, text_y), display_label, fill=0, font=pil_font)
+    img[:] = np.array(pil_img)
 
     return img
 
@@ -549,23 +586,118 @@ def _close(val, value_m, tol=0.2):
     return False
 
 
-def process_image(input_path, output_path):
-    """Process a single SEM image."""
+def _process_image_fast(input_path, output_path, context):
+    """Process an image using geometry and scale metadata from a validated image."""
+    gray = load_image_as_gray(input_path)
+    if gray is None or gray.shape != context['shape']:
+        return False
+
+    panel_start = context['panel_start']
+    if panel_start <= 0 or panel_start >= gray.shape[0]:
+        return False
+
+    h, w = gray.shape
+    value_m = context['value_m']
+    label = context['label']
+    hfw_m = context['hfw_m']
+
+    if hfw_m:
+        new_bar_px = int(value_m * w / hfw_m)
+    else:
+        new_bar_px = context['scale_bar_width_px']
+    new_bar_px = max(80, min(new_bar_px, w // 3))
+
+    cropped = gray[:panel_start, :].copy()
+    draw_scale_bar_on_image(cropped, new_bar_px, value_m, label)
+    _save_publication_png(cropped, output_path)
+    return True
+
+
+def _build_folder_profile(gray, context):
+    """Build a microscope profile dict from the first analyzed image.
+
+    The profile stores panel geometry, separator polarity, and scale metadata
+    so subsequent images can skip detection and OCR when they share the same
+    microscope layout and magnification.
+    """
+    return {
+        'shape': context['shape'],
+        'panel_start': context['panel_start'],
+        'panel_end': context['panel_end'],
+        'scale_bar_width_px': context['scale_bar_width_px'],
+        'value_m': context['value_m'],
+        'label': context['label'],
+        'hfw_m': context['hfw_m'],
+    }
+
+
+def _process_image_with_profile(input_path, output_path, profile):
+    """Process an image using a folder profile for fast reuse.
+
+    If the image has the exact same shape, skip all detection and OCR entirely
+    (crop + overlay + save).  If the shape differs, fall back to full
+    process_image analysis.
+    """
     gray = load_image_as_gray(input_path)
     if gray is None:
         print(f'  ERROR: Could not read {input_path}')
         return False
 
-    bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    if gray.shape == profile['shape']:
+        panel_start = profile['panel_start']
+        if panel_start <= 0 or panel_start >= gray.shape[0]:
+            return False
+        h, w = gray.shape
+        value_m = profile['value_m']
+        label = profile['label']
+        hfw_m = profile['hfw_m']
+        if hfw_m:
+            new_bar_px = int(value_m * w / hfw_m)
+        else:
+            new_bar_px = profile['scale_bar_width_px']
+        new_bar_px = max(80, min(new_bar_px, w // 3))
+        cropped = gray[:panel_start, :].copy()
+        draw_scale_bar_on_image(cropped, new_bar_px, value_m, label)
+        _save_publication_png(cropped, output_path)
+        return True
+    else:
+        return process_image(input_path, output_path)
+
+
+def process_image(input_path, output_path, magnification_cache=None, return_context=False):
+    """Process one image, reusing OCR only for matching panel metadata."""
+    gray = load_image_as_gray(input_path)
+    if gray is None:
+        print(f'  ERROR: Could not read {input_path}')
+        return (False, None) if return_context else False
+
     h, w = gray.shape
 
     panel_start, panel_end = find_info_panel(gray)
     if panel_start is None:
         print(f'  WARNING: No info panel found, copying as-is')
-        cv2.imwrite(output_path, bgr)
-        return True
+        _save_publication_png(gray, output_path)
+        return (False, None) if return_context else False
 
     scale_bar = find_scale_bar_line(gray, panel_start, panel_end)
+
+    cache_key = None
+    if scale_bar is not None and magnification_cache is not None:
+        cache_key = magnification_cache_key(gray, panel_start, panel_end, scale_bar)
+        cached = magnification_cache.get(cache_key)
+        if cached is not None:
+            value_m = cached['value_m']
+            label = cached['label']
+            hfw_m = cached['hfw_m']
+            if hfw_m:
+                new_bar_px = int(value_m * w / hfw_m)
+            else:
+                new_bar_px = scale_bar['width_px']
+            new_bar_px = max(80, min(new_bar_px, w // 3))
+            cropped = gray[:panel_start, :].copy()
+            draw_scale_bar_on_image(cropped, new_bar_px, value_m, label)
+            _save_publication_png(cropped, output_path)
+            return (True, cached) if return_context else True
 
     value_m, label = ocr_scale_label(gray, panel_start, panel_end)
 
@@ -676,8 +808,8 @@ def process_image(input_path, output_path):
 
     if value_m is None or scale_bar is None:
         print(f'  WARNING: Could not parse scale, cropping without scale bar')
-        cv2.imwrite(output_path, bgr[:panel_start, :])
-        return True
+        _save_publication_png(gray[:panel_start, :], output_path)
+        return (False, None) if return_context else False
 
     if hfw_m:
         px_per_m = w / hfw_m
@@ -687,12 +819,22 @@ def process_image(input_path, output_path):
 
     new_bar_px = max(80, min(new_bar_px, w // 3))
 
-    cropped = bgr[:panel_start, :].copy()
+    cropped = gray[:panel_start, :].copy()
 
     draw_scale_bar_on_image(cropped, new_bar_px, value_m, label)
 
-    cv2.imwrite(output_path, cropped)
-    return True
+    _save_publication_png(cropped, output_path)
+    context = {
+        'cache_key': cache_key,
+        'shape': gray.shape,
+        'panel_start': panel_start,
+        'panel_end': panel_end,
+        'scale_bar_width_px': scale_bar['width_px'],
+        'value_m': value_m,
+        'label': label,
+        'hfw_m': hfw_m,
+    }
+    return (True, context) if return_context else True
 
 
 def main():
@@ -703,6 +845,13 @@ def main():
                         help='Input directory of SEM images (default: script dir).')
     parser.add_argument('--output', '-o', default=None,
                         help='Output directory (default: <input>/processed).')
+    parser.add_argument('--no-cache', '--no-fast', dest='no_cache', action='store_true',
+                        help='Disable adaptive OCR caching and fully analyze every image.')
+    parser.add_argument('--folder-profile', action='store_true',
+                        help='Analyze the first image fully, then reuse its panel geometry and '
+                             'scale metadata for all subsequent same-shape images in the folder. '
+                             'Much faster when all images come from the same microscope at the '
+                             'same magnification.')
     args = parser.parse_args()
 
     script_dir = Path(__file__).parent
@@ -729,24 +878,76 @@ def main():
 
     success = 0
     failed = 0
+    profile = None
+    profile_count = 0
+
+    magnification_cache = {} if not args.no_cache else None
+    cache_count = 0
+    new_magnification_count = 0
 
     for i, input_path in enumerate(input_files, 1):
         output_path = output_dir / (input_path.stem + '.png')
         print(f'[{i}/{len(input_files)}] {input_path.name}...', end=' ', flush=True)
 
         try:
-            ok = process_image(str(input_path), str(output_path))
-            if ok:
-                print('OK')
-                success += 1
+            if args.folder_profile and profile is not None:
+                ok = _process_image_with_profile(
+                    str(input_path), str(output_path), profile)
+                if ok:
+                    profile_count += 1
+                    print('OK (profile)')
+                    success += 1
+                else:
+                    ok, context = process_image(
+                        str(input_path), str(output_path),
+                        magnification_cache=magnification_cache,
+                        return_context=True)
+                    if ok:
+                        print('OK (re-analyzed)')
+                        success += 1
+                    else:
+                        print('FAILED')
+                        failed += 1
+                    if magnification_cache is not None and context is not None:
+                        cache_key = context.get('cache_key')
+                        if cache_key is not None and cache_key not in magnification_cache:
+                            magnification_cache[cache_key] = context
             else:
-                print('FAILED')
-                failed += 1
+                before = len(magnification_cache) if magnification_cache is not None else 0
+                ok, context = process_image(
+                    str(input_path), str(output_path),
+                    magnification_cache=magnification_cache,
+                    return_context=True)
+                if args.folder_profile and ok and profile is None and context is not None:
+                    profile = _build_folder_profile(None, context)
+                    print(f'OK (profile created: {context["value_m"]:.2e} m, '
+                          f'panel={context["panel_start"]})')
+                elif ok:
+                    print('OK')
+                else:
+                    print('FAILED')
+                if ok:
+                    success += 1
+                else:
+                    failed += 1
+                if magnification_cache is not None and context is not None:
+                    cache_key = context.get('cache_key')
+                    if cache_key is not None and cache_key not in magnification_cache:
+                        magnification_cache[cache_key] = context
+                        new_magnification_count += 1
+                    elif cache_key is not None:
+                        cache_count += 1
         except Exception as e:
             print(f'ERROR: {e}')
             failed += 1
 
     print(f'\nDone: {success} succeeded, {failed} failed out of {len(input_files)} total.')
+    if args.folder_profile:
+        print(f'Folder profile: {"created" if profile else "not created"}, '
+              f'{profile_count} images reused profile.')
+    if magnification_cache is not None:
+        print(f'Adaptive OCR cache: {len(magnification_cache)} magnifications, '
+              f'{cache_count} reused images, {new_magnification_count} new analyses.')
     print(f'Output saved to: {output_dir}')
 
 
