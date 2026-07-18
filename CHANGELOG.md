@@ -2,6 +2,7 @@
 
 ## 2.0.0 — 2026-07-18
 
+- Renamed the user-facing application and primary terminal command to `SEMfig` / `semfig`.
 - Added zero-argument `sem-ready` processing with publication-safe terminal defaults and PATH setup.
 - Added publication-size profiles with effective-DPI validation and no automatic upscaling.
 - Added safe grayscale conversion, optimized PNG/TIFF, JPEG size targeting, and PSNR guard.

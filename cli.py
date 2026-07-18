@@ -1,4 +1,4 @@
-"""Non-interactive batch interface for SEM Ready."""
+"""Non-interactive batch interface for SEMfig."""
 
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ REPORT_FIELDS = [
 
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
+        prog="semfig",
         description="Automatically crop SEM footers and add HFW-calibrated scale bars.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -423,7 +424,7 @@ def main(argv=None) -> int:
     if records:
         create_qc_sheet(records, args.output / "batch_qc.jpg")
         summary = {
-            "tool": "SEM Ready",
+            "tool": "SEMfig",
             "completed_utc": datetime.now(timezone.utc).isoformat(),
             "settings": settings_payload,
             "settings_sha256": settings_sha,

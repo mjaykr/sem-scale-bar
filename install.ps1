@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Creates an isolated Python environment and installs SEM Ready.
+Creates an isolated Python environment and installs SEMfig.
 
 .EXAMPLE
 PowerShell -ExecutionPolicy Bypass -File .\install.ps1
@@ -40,8 +40,8 @@ if (($env:Path -split ";") -notcontains $scriptRoot) {
     $env:Path = "$scriptRoot;$env:Path"
 }
 
-Write-Host "Installation complete. Open a new terminal and run 'sem-ready' from any image folder."
-Write-Host "Use .\run_sem_ready.bat to start the desktop interface."
+Write-Host "Installation complete. Open a new terminal and run 'semfig' from any image folder."
+Write-Host "Use .\run_semfig.bat to start the desktop interface."
 if ($Launch) {
     & $venvPython app.py
 }

@@ -1,4 +1,4 @@
-"""Core processing for SEM Ready.
+"""Core processing for SEMfig.
 
 The module deliberately keeps the scientific image unchanged except for cropping
 the microscope footer and drawing the requested scale annotation.
@@ -679,7 +679,7 @@ def export(image: Image.Image, destination: str | Path, analysis: Analysis,
     if audit:
         source_bytes = Path(analysis.source).read_bytes()
         record = {
-            "tool": f"SEM Ready {__version__}",
+            "tool": f"SEMfig {__version__}",
             "created_utc": datetime.now(timezone.utc).isoformat(),
             "source": analysis.source,
             "source_sha256": hashlib.sha256(source_bytes).hexdigest(),

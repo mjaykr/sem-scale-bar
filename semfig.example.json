@@ -1,0 +1,14 @@
+{
+  "inputs": ["incoming"],
+  "output": "Publication_ready",
+  "recursive": true,
+  "format": "png",
+  "profile": "single-column",
+  "enhancement": "raw",
+  "scale_position": "bottom-right",
+  "journal_preset": "single-column",
+  "auto_scale": false,
+  "min_ocr_confidence": 0.2,
+  "strict_dpi": false,
+  "overwrite": true
+}

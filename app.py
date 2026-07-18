@@ -1,4 +1,4 @@
-"""Desktop interface for SEM Ready."""
+"""Desktop interface for SEMfig."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from cli import REPORT_FIELDS, discover_inputs, write_report
 class SEMReadyApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("SEM Ready — calibrated publication images")
+        self.title("SEMfig — calibrated publication images")
         self.geometry("1180x800")
         self.minsize(920, 680)
         self.image: Image.Image | None = None
@@ -68,7 +68,7 @@ class SEMReadyApp(tk.Tk):
         preview.rowconfigure(1, weight=1)
         preview.columnconfigure(0, weight=1)
 
-        ttk.Label(controls, text="SEM Ready", font=("Segoe UI", 22, "bold")).pack(anchor="w")
+        ttk.Label(controls, text="SEMfig", font=("Segoe UI", 22, "bold")).pack(anchor="w")
         ttk.Label(controls, text="Automatic batch · individual review", foreground="#555").pack(
             anchor="w", pady=(0, 16))
 

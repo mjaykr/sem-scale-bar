@@ -1,6 +1,6 @@
-# SEM Ready
+# SEMfig
 
-SEM Ready converts raw scanning electron microscope (SEM) exports into
+SEMfig converts raw scanning electron microscope (SEM) exports into
 publication-ready figures while preserving the original image file. It detects and
 removes the instrument footer, reads calibration with EasyOCR, and adds a clear,
 calibrated scale bar.
@@ -47,7 +47,7 @@ images. TIFF is recommended for publication output.
    PowerShell -ExecutionPolicy Bypass -File .\install.ps1
    ```
 
-4. Start the program by double-clicking `run_sem_ready.bat`.
+4. Start the program by double-clicking `run_semfig.bat`.
 
 The installer creates a local `.venv` environment, so packages do not affect other
 Python projects on the computer. It also adds this repository to your user PATH.
@@ -60,7 +60,7 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -e .
-sem-ready-gui
+semfig-gui
 ```
 
 If PowerShell prevents activation, use the installer above or run the virtual
@@ -77,15 +77,15 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e .
-sem-ready-gui
+semfig-gui
 ```
 
-Installation also provides `sem-ready`, `sem-ready-watch`, and
-`sem-ready-figure` commands for batch, watch-folder, and multi-panel workflows.
+Installation also provides `semfig`, `semfig-watch`, and `semfig-figure` commands
+for batch, watch-folder, and multi-panel workflows.
 
 ## Use the desktop app
 
-Run `run_sem_ready.bat` or `python app.py`.
+Run `run_semfig.bat` or `python app.py`.
 
 ### Automatic tab
 
@@ -140,7 +140,7 @@ Size profiles reduce storage without inventing resolution:
 | Double column | 178 mm | 300 DPI | Downsamples only when more than 2102 px wide. |
 | High resolution | 105 mm | 600 DPI | Requires up to 2480 px; never upscales automatically. |
 
-SEM Ready converts redundant RGB channels to 8-bit grayscale, uses optimized PNG,
+SEMfig converts redundant RGB channels to 8-bit grayscale, uses optimized PNG,
 TIFF-LZW, or high-quality JPEG encoding, and reports the final bytes and effective
 DPI. JPEG size targeting never drops below its 35 dB PSNR quality guard. Enable
 **Require profile DPI** (or `--strict-dpi`) to reject a source that cannot meet the
@@ -155,7 +155,7 @@ The CLI is useful for scripts, laboratory acquisition pipelines, and Task Schedu
 Open a terminal in any folder containing SEM images and run:
 
 ```powershell
-sem-ready
+semfig
 ```
 
 With no arguments, the command uses these defaults:
@@ -171,7 +171,7 @@ With no arguments, the command uses these defaults:
 | Size profile | Single column |
 | Existing output | Overwritten |
 
-Use `sem-ready --no-overwrite` when existing results should be kept.
+Use `semfig --no-overwrite` when existing results should be kept.
 
 ```powershell
 # Process every supported image in a folder
@@ -202,10 +202,10 @@ Useful switches:
 
 ### Saved profiles and resumable batches
 
-Copy `sem-ready.example.json`, edit it, then run:
+Copy `semfig.example.json`, edit it, then run:
 
 ```powershell
-python cli.py --config sem-ready.json
+semfig --config semfig.json
 ```
 
 Every output project contains `.sem_ready_manifest.json`. It hashes source content
@@ -217,7 +217,7 @@ resume safely. Use `--retry-failed` to process only previous failures.
 Process files after their size and timestamp have remained stable for one scan:
 
 ```powershell
-python watch_folder.py incoming -o ready --config sem-ready.json --recursive
+semfig-watch incoming -o ready --config semfig.json --recursive
 ```
 
 Use `Ctrl+C` to stop. `--once` performs one immediate scan, which is useful for
@@ -256,7 +256,7 @@ Use `--no-ocr` only when HFW and scale values are supplied for every image.
 
 ## Output files
 
-For each exported image, SEM Ready creates:
+For each exported image, SEMfig creates:
 
 ```text
 publication_ready/
@@ -271,7 +271,7 @@ publication_ready/
 
 The JSON sidecar records the source SHA-256 hash, formula, OCR tokens, selected
 style, enhancement settings, and black/white clipping measurements. DPI is metadata
-only; SEM Ready does not claim to increase spatial resolution.
+only; SEMfig does not claim to increase spatial resolution.
 
 ## Troubleshooting
 
@@ -280,7 +280,7 @@ only; SEM Ready does not claim to increase spatial resolution.
 | EasyOCR downloads models on first run | Wait for the initial download, then future runs are local. |
 | OCR values are wrong or missing | Use the Individual image tab to correct HFW/scale/crop, or use an override CSV in a batch. |
 | Batch image is skipped | Open `batch_report.csv`; low OCR confidence is intentionally blocked to avoid an incorrect scientific scale. |
-| App will not open | Run `PowerShell -ExecutionPolicy Bypass -File .\install.ps1` again, then use `run_sem_ready.bat`. |
+| App will not open | Run `PowerShell -ExecutionPolicy Bypass -File .\install.ps1` again, then use `run_semfig.bat`. |
 | TIFF is too large | Use PNG for lossless smaller files or JPEG for presentation-only copies. |
 
 ## Tests
@@ -296,13 +296,13 @@ python -m unittest -v
 | `app.py` | Desktop Tkinter application. |
 | `cli.py` | Non-interactive batch processing command. |
 | `sem_ready.py` | Image processing, OCR, calibration, enhancement, and export core. |
-| `run_sem_ready.bat` | Starts the desktop app, preferring `.venv` when present. |
-| `sem-ready.cmd` | PATH launcher for one-command terminal processing. |
+| `run_semfig.bat` | Starts the desktop app, preferring `.venv` when present. |
+| `semfig.cmd` | PATH launcher for one-command terminal processing. |
 | `install.ps1` | Windows one-command installer. |
 | `run_batch.ps1` | Windows batch/Task Scheduler wrapper. |
 | `watch_folder.py` | Stable-file watch service for microscope export folders. |
 | `figure_builder.py` | Multi-panel publication figure assembly. |
-| `sem-ready.example.json` | Reusable automation-profile example. |
+| `semfig.example.json` | Reusable automation-profile example. |
 | `test_sem_ready.py` | Automated tests. |
 | `archive/` | Preserved snapshot of the earlier repository version. |
 
