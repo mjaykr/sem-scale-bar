@@ -421,6 +421,70 @@ def _binarise_for_ocr(region, upscale=4):
     return best
 
 
+def _ocr_region_texts(region):
+    """Return OCR text candidates from raw and enhanced panel images.
+
+    Small SEM panels often produce a usable number but a damaged unit glyph.
+    Keep several OCR candidates so parsing can choose a physically meaningful
+    scale instead of selecting one image based only on alphabetic characters.
+    """
+    if region.size == 0:
+        return []
+
+    variants = [region]
+    for upscale in (4, 6):
+        large = cv2.resize(
+            region, (region.shape[1] * upscale, region.shape[0] * upscale),
+            interpolation=cv2.INTER_CUBIC)
+        variants.append(large)
+        blurred = cv2.GaussianBlur(large, (3, 3), 0)
+        _, otsu = cv2.threshold(
+            blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        variants.extend((otsu, 255 - otsu))
+
+    texts = []
+    seen = set()
+    for variant in variants:
+        for psm in (6, 7):
+            text = pytesseract.image_to_string(variant, config=f'--psm {psm}').strip()
+            if text and text not in seen:
+                seen.add(text)
+                texts.append(text)
+    return texts
+
+
+def _parse_scale_text(text):
+    """Parse a scale label and normalize common OCR errors for micro units."""
+    if not text:
+        return None, None
+
+    # Tesseract commonly renders the micro sign as y, u, or a replacement
+    # character on small SEM panels. In a scale-label context these all mean µm.
+    unit_pattern = r'(nm|n\s*m|um|u\s*m|ym|y\s*m|\u00b5\s*m|\u03bc\s*m|�\s*m)'
+    # The scale value is commonly printed immediately after HFW. If the unit
+    # glyph is badly damaged, recover that number as micrometres. This avoids
+    # mistaking the unrelated timestamp token "36 PM" for a scale.
+    hfw_match = re.search(r'\bH\s*[FRE]\s*[WVY]\b', text, re.IGNORECASE)
+    if hfw_match:
+        after_hfw = text[hfw_match.end():hfw_match.end() + 50]
+        bare_value = re.search(r'\b(\d+(?:[.,]\d+)?)\b', after_hfw)
+        if bare_value:
+            value = float(bare_value.group(1).replace(',', '.'))
+            return value * 1e-6, f'{int(value)} \u00b5m' if value.is_integer() else f'{value:g} \u00b5m'
+
+    matches = re.finditer(
+        rf'(\d+(?:[.,]\d+)?)\s*{unit_pattern}\b',
+        text.replace('\n', ' '), re.IGNORECASE)
+    for match in matches:
+        value = float(match.group(1).replace(',', '.'))
+        unit = re.sub(r'\s+', '', match.group(2).lower())
+        if unit == 'nm' or unit == 'n m':
+            return value * 1e-9, f'{int(value)} nm' if value.is_integer() else f'{value:g} nm'
+        return value * 1e-6, f'{int(value)} \u00b5m' if value.is_integer() else f'{value:g} \u00b5m'
+
+    return None, None
+
+
 def ocr_scale_label(gray, panel_start, panel_end=None):
     """Read the scale bar label text using OCR on the info panel region.
 
@@ -438,6 +502,14 @@ def ocr_scale_label(gray, panel_start, panel_end=None):
     label_top = panel_start
     label_bottom = min(panel_start + label_height, h)
 
+    # The full panel preserves reading order. On low-resolution images the
+    # narrow label crop can lose the numeric label while still finding HFW.
+    full_panel = gray[panel_start:min(panel_end + 1, h), :]
+    for text in _ocr_region_texts(full_panel):
+        value_m, label = _parse_scale_text(text)
+        if value_m is not None:
+            return value_m, label
+
     region_configs = [
         (int(w * 0.5), min(w, int(w * 0.98))),
         (int(w * 0.3), min(w, int(w * 0.98))),
@@ -449,19 +521,10 @@ def ocr_scale_label(gray, panel_start, panel_end=None):
         if label_region.size == 0:
             continue
 
-        binary = _binarise_for_ocr(label_region)
-        text = pytesseract.image_to_string(binary, config='--psm 7').strip()
-
-        nm_match = re.search(r'(\d+)\s*n\s*m', text, re.IGNORECASE)
-        if nm_match:
-            value = float(nm_match.group(1))
-            return value * 1e-9, f'{int(value)} nm'
-
-        um_match = re.search(r'(\d+(?:\.\d+)?)\s*u', text, re.IGNORECASE)
-        if um_match:
-            value = float(um_match.group(1))
-            label = f'{int(value)} \u00b5m' if value == int(value) else f'{value} \u00b5m'
-            return value * 1e-6, label
+        for text in _ocr_region_texts(label_region):
+            value_m, label = _parse_scale_text(text)
+            if value_m is not None:
+                return value_m, label
 
     return None, None
 
@@ -469,8 +532,8 @@ def ocr_scale_label(gray, panel_start, panel_end=None):
 def ocr_panel_full(gray, panel_start, panel_end):
     """Fallback: read full panel OCR to extract HFW for scale calculation."""
     panel = gray[panel_start:panel_end + 1, :]
-    binary = _binarise_for_ocr(panel, upscale=3)
-    return pytesseract.image_to_string(binary)
+    candidates = _ocr_region_texts(panel)
+    return max(candidates, key=len, default='')
 
 
 def get_font_path():
