@@ -58,8 +58,8 @@ Python projects on the computer.
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-python app.py
+python -m pip install -e .
+sem-ready-gui
 ```
 
 If PowerShell prevents activation, use the installer above or run the virtual
@@ -75,9 +75,12 @@ environment directly:
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-python app.py
+python -m pip install -e .
+sem-ready-gui
 ```
+
+Installation also provides `sem-ready`, `sem-ready-watch`, and
+`sem-ready-figure` commands for batch, watch-folder, and multi-panel workflows.
 
 ## Use the desktop app
 
@@ -124,6 +127,24 @@ For quantitative image analysis, use **Raw** unless your analysis protocol permi
 the selected transformation. Publication enhancements should be applied consistently
 to images being compared.
 
+## Publication-size and file-size optimization
+
+Size profiles reduce storage without inventing resolution:
+
+| Profile | Intended width | Target | Behaviour |
+| --- | ---: | ---: | --- |
+| Original | User-defined | Existing pixels | No resampling. |
+| Quarter A4 | 105 mm | 300 DPI | Downsamples only when more than 1240 px wide. |
+| Single column | 85 mm | 300 DPI | Downsamples only when more than 1004 px wide. |
+| Double column | 178 mm | 300 DPI | Downsamples only when more than 2102 px wide. |
+| High resolution | 105 mm | 600 DPI | Requires up to 2480 px; never upscales automatically. |
+
+SEM Ready converts redundant RGB channels to 8-bit grayscale, uses optimized PNG,
+TIFF-LZW, or high-quality JPEG encoding, and reports the final bytes and effective
+DPI. JPEG size targeting never drops below its 35 dB PSNR quality guard. Enable
+**Require profile DPI** (or `--strict-dpi`) to reject a source that cannot meet the
+selected print requirement.
+
 ## Command-line and automation
 
 The CLI is useful for scripts, laboratory acquisition pipelines, and Task Scheduler.
@@ -147,8 +168,43 @@ Useful switches:
 --scale-position bottom-right|bottom-left|top-right|top-left
 --journal-preset quarter-a4|single-column|double-column
 --auto-scale
+--profile original|quarter-a4|single-column|double-column|high-resolution
+--max-file-mb 5
+--strict-dpi
+--name-template "{stem}_{profile}"
 --overwrite
 --recursive
+```
+
+### Saved profiles and resumable batches
+
+Copy `sem-ready.example.json`, edit it, then run:
+
+```powershell
+python cli.py --config sem-ready.json
+```
+
+Every output project contains `.sem_ready_manifest.json`. It hashes source content
+and processing settings, skips exact duplicates, and allows interrupted runs to
+resume safely. Use `--retry-failed` to process only previous failures.
+
+### Watch-folder automation
+
+Process files after their size and timestamp have remained stable for one scan:
+
+```powershell
+python watch_folder.py incoming -o ready --config sem-ready.json --recursive
+```
+
+Use `Ctrl+C` to stop. `--once` performs one immediate scan, which is useful for
+Task Scheduler and testing.
+
+### Multi-panel figures
+
+Build a consistently labelled `(a)`, `(b)`, … figure from processed images:
+
+```powershell
+python figure_builder.py ready\a.png ready\b.png ready\c.png --output figure.tif --columns 2 --dpi 600 --target-width-mm 178
 ```
 
 For Windows Task Scheduler, use:
@@ -183,7 +239,10 @@ publication_ready/
 ├── sample_publication.tif
 ├── sample_publication.tif.json     # calibration, OCR, crop, enhancements, source hash
 ├── batch_report.csv                # status and values for all images
-└── batch_qc.jpg                    # thumbnail QC overview
+├── batch_report.xlsx               # formatted Excel report
+├── batch_qc.jpg                    # thumbnail QC overview
+├── project_summary.json            # settings, counts, and artifact paths
+└── .sem_ready_manifest.json        # resume and duplicate-detection state
 ```
 
 The JSON sidecar records the source SHA-256 hash, formula, OCR tokens, selected
@@ -216,6 +275,9 @@ python -m unittest -v
 | `run_sem_ready.bat` | Starts the desktop app, preferring `.venv` when present. |
 | `install.ps1` | Windows one-command installer. |
 | `run_batch.ps1` | Windows batch/Task Scheduler wrapper. |
+| `watch_folder.py` | Stable-file watch service for microscope export folders. |
+| `figure_builder.py` | Multi-panel publication figure assembly. |
+| `sem-ready.example.json` | Reusable automation-profile example. |
 | `test_sem_ready.py` | Automated tests. |
 | `archive/` | Preserved snapshot of the earlier repository version. |
 

@@ -6,18 +6,21 @@ import argparse
 import csv
 from datetime import datetime, timezone
 import glob
+import hashlib
 import json
 from pathlib import Path
+import re
 import sys
 import time
 
 from sem_ready import (EnhancementOptions, SUPPORTED_EXTENSIONS, analyze, export,
-                       create_qc_sheet, nice_scale_value)
+                       create_qc_sheet, nice_scale_value, PUBLICATION_PROFILES)
 
 
 REPORT_FIELDS = [
     "status", "source", "output", "crop_y", "crop_confidence", "hfw_um",
     "hfw_confidence", "scale_um", "scale_confidence", "bar_pixels",
+    "effective_dpi", "output_bytes", "vendor", "profile", "source_sha256",
     "elapsed_seconds", "warnings", "error",
 ]
 
@@ -27,7 +30,8 @@ def parser() -> argparse.ArgumentParser:
         description="Automatically crop SEM footers and add HFW-calibrated scale bars.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("inputs", nargs="+", help="Images, directories, or wildcard patterns")
+    p.add_argument("inputs", nargs="*", help="Images, directories, or wildcard patterns")
+    p.add_argument("--config", type=Path, help="JSON settings profile")
     p.add_argument("-o", "--output", type=Path, default=Path("publication_ready"))
     p.add_argument("--recursive", action="store_true", help="Search input directories recursively")
     p.add_argument("--overrides-csv", type=Path,
@@ -41,11 +45,19 @@ def parser() -> argparse.ArgumentParser:
                    help=argparse.SUPPRESS)
     p.add_argument("--dpi", type=int, default=600)
     p.add_argument("--format", choices=("tif", "png", "jpg"), default="tif")
+    p.add_argument("--name-template", default="{stem}_publication",
+                   help="Output name using {stem}, {profile}, and {format}")
+    p.add_argument("--profile", choices=tuple(PUBLICATION_PROFILES), default="original",
+                   help="Print-size/resolution optimization profile")
+    p.add_argument("--max-file-mb", type=float, help="JPEG size target in MB")
+    p.add_argument("--jpeg-quality", type=int, default=95)
+    p.add_argument("--strict-dpi", action="store_true",
+                   help="Fail when the source cannot meet the profile DPI")
     p.add_argument("--enhancement",
                    choices=("raw", "auto-contrast", "balanced", "local-contrast",
                             "detail", "uneven-background", "inverted"), default="raw")
     p.add_argument("--scale-position",
-                   choices=("bottom-right", "bottom-left", "top-right", "top-left"),
+                   choices=("auto", "bottom-right", "bottom-left", "top-right", "top-left"),
                    default="bottom-right")
     p.add_argument("--journal-preset", choices=("quarter-a4", "single-column", "double-column"),
                    default="quarter-a4")
@@ -56,6 +68,10 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--no-ocr", action="store_true",
                    help="Never run OCR; calibration must be supplied by overrides")
     p.add_argument("--overwrite", action="store_true", help="Replace existing outputs")
+    p.add_argument("--manifest", type=Path,
+                   help="Resume/deduplication manifest (default: OUTPUT/.sem_ready_manifest.json)")
+    p.add_argument("--retry-failed", action="store_true",
+                   help="Process only items marked failed in the existing manifest")
     p.add_argument("--fail-fast", action="store_true", help="Stop after the first failed image")
     p.add_argument("--report", type=Path,
                    help="CSV report path (default: OUTPUT/batch_report.csv)")
@@ -159,14 +175,22 @@ def _journal(name: str) -> tuple[float, float]:
 
 
 def _destination(source: Path, output: Path, extension: str,
-                 used: dict[str, Path]) -> Path:
-    base = output / f"{source.stem}_publication.{extension}"
+                 used: dict[str, Path], template: str = "{stem}_publication",
+                 profile: str = "original") -> Path:
+    try:
+        name = template.format(stem=source.stem, profile=profile, format=extension)
+    except (KeyError, ValueError) as exc:
+        raise ValueError(f"Invalid --name-template: {exc}") from exc
+    name = re.sub(r'[<>:"/\\|?*]', "_", name).strip(" .")
+    if not name:
+        raise ValueError("Output name template produced an empty name")
+    base = output / f"{name}.{extension}"
     key = str(base).lower()
     if key in used and used[key] != source:
         # Stable suffix avoids collisions when recursive folders contain the same name.
         import hashlib
         suffix = hashlib.sha1(str(source).encode("utf-8")).hexdigest()[:8]
-        base = output / f"{source.stem}_publication_{suffix}.{extension}"
+        base = output / f"{name}_{suffix}.{extension}"
     used[str(base).lower()] = source
     return base
 
@@ -179,14 +203,94 @@ def write_report(path: Path, records: list[dict]):
         writer.writeheader()
         writer.writerows(records)
     temporary.replace(path)
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "SEM batch report"
+        sheet.append(REPORT_FIELDS)
+        for record in records:
+            sheet.append([record.get(field, "") for field in REPORT_FIELDS])
+        for cell in sheet[1]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="1F4E78")
+        sheet.freeze_panes = "A2"
+        sheet.auto_filter.ref = sheet.dimensions
+        for column in sheet.columns:
+            width = min(60, max(10, max(len(str(cell.value or "")) for cell in column) + 2))
+            sheet.column_dimensions[column[0].column_letter].width = width
+        excel_path = path.with_suffix(".xlsx")
+        temporary_excel = excel_path.with_suffix(".xlsx.tmp")
+        workbook.save(temporary_excel)
+        temporary_excel.replace(excel_path)
+    except ImportError:
+        pass
+
+
+def _parse_args(argv=None):
+    preliminary = argparse.ArgumentParser(add_help=False)
+    preliminary.add_argument("--config", type=Path)
+    known, _ = preliminary.parse_known_args(argv)
+    defaults = {}
+    config_inputs = []
+    if known.config:
+        try:
+            data = json.loads(known.config.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            preliminary.error(f"Cannot read config: {exc}")
+        if not isinstance(data, dict):
+            preliminary.error("Config root must be a JSON object")
+        config_inputs = data.pop("inputs", [])
+        defaults = data
+    command_parser = parser()
+    if defaults:
+        valid = {action.dest for action in command_parser._actions}
+        unknown = sorted(set(defaults) - valid)
+        if unknown:
+            command_parser.error(f"Unknown config keys: {', '.join(unknown)}")
+        command_parser.set_defaults(**defaults)
+    args = command_parser.parse_args(argv)
+    if not args.inputs:
+        args.inputs = [str(value) for value in config_inputs]
+    if not args.inputs:
+        command_parser.error("provide input images/folders or set 'inputs' in --config")
+    return args
+
+
+def _load_manifest(path: Path) -> dict:
+    if not path.exists():
+        return {"version": 1, "items": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("items"), dict):
+            return data
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {"version": 1, "items": {}}
+
+
+def _write_manifest(path: Path, manifest: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(path)
 
 
 def main(argv=None) -> int:
-    args = parser().parse_args(argv)
+    args = _parse_args(argv)
+    args.output = Path(args.output)
+    args.overrides_csv = Path(args.overrides_csv) if args.overrides_csv else None
+    args.report = Path(args.report) if args.report else None
+    args.manifest = Path(args.manifest) if args.manifest else None
     if not (0 <= args.min_ocr_confidence <= 1):
         parser().error("--min-ocr-confidence must be between 0 and 1")
     if not (72 <= args.dpi <= 2400):
         parser().error("--dpi must be between 72 and 2400")
+    if not (70 <= args.jpeg_quality <= 100):
+        parser().error("--jpeg-quality must be between 70 and 100")
+    if args.max_file_mb is not None and args.max_file_mb <= 0:
+        parser().error("--max-file-mb must be positive")
 
     try:
         sources, discovery_problems = discover_inputs(args.inputs, args.recursive)
@@ -210,18 +314,42 @@ def main(argv=None) -> int:
         return 2
     args.output.mkdir(parents=True, exist_ok=True)
     report_path = args.report or (args.output / "batch_report.csv")
+    manifest_path = args.manifest or (args.output / ".sem_ready_manifest.json")
+    manifest = _load_manifest(manifest_path)
     records: list[dict] = []
     used_destinations: dict[str, Path] = {}
     failures = 0
     enhancements = _enhancement(args.enhancement)
     label_pt, figure_width_mm = _journal(args.journal_preset)
+    settings_payload = {
+        key: getattr(args, key) for key in (
+            "format", "profile", "name_template", "dpi", "enhancement", "scale_position",
+            "journal_preset", "auto_scale", "max_file_mb", "jpeg_quality", "strict_dpi")
+    }
+    settings_sha = hashlib.sha256(
+        json.dumps(settings_payload, sort_keys=True).encode("utf-8")).hexdigest()
 
     for source in sources:
         started = time.perf_counter()
-        destination = _destination(source, output_root, args.format, used_destinations)
+        destination = _destination(source, output_root, args.format, used_destinations,
+                                   args.name_template, args.profile)
         record = {name: "" for name in REPORT_FIELDS}
-        record.update(status="error", source=str(source), output=str(destination))
+        record.update(status="error", source=str(source), output=str(destination), profile=args.profile)
         try:
+            source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+            record["source_sha256"] = source_sha
+            prior = manifest["items"].get(str(source))
+            if args.retry_failed and (not prior or prior.get("status") != "error"):
+                record.update(status="skipped", warnings="Not previously marked failed")
+                continue
+            duplicate = next((item for item in manifest["items"].values()
+                              if item.get("source_sha256") == source_sha
+                              and item.get("settings_sha256") == settings_sha
+                              and item.get("status") == "ok"
+                              and Path(item.get("output", "")).exists()), None)
+            if duplicate and not args.overwrite:
+                record.update(status="skipped", warnings=f"Duplicate of {duplicate.get('source')}")
+                continue
             row = override_for(source, overrides)
             crop = _number(row, "crop_y", args.crop_y, int)
             supplied_hfw = _number(row, "hfw_um", args.hfw_um, float)
@@ -251,7 +379,12 @@ def main(argv=None) -> int:
 
             export(image, destination, result, hfw, scale, "black", args.dpi, not args.no_audit,
                    enhancements=enhancements, position=args.scale_position,
-                   label_pt=label_pt, figure_width_mm=figure_width_mm)
+                   label_pt=label_pt, figure_width_mm=figure_width_mm,
+                   profile=args.profile, max_file_mb=args.max_file_mb,
+                   jpeg_quality=args.jpeg_quality, strict_dpi=args.strict_dpi)
+            audit_path = destination.with_suffix(destination.suffix + ".json")
+            audit_data = (json.loads(audit_path.read_text(encoding="utf-8"))
+                          if audit_path.exists() else {})
             record.update(
                 status="ok", crop_y=result.crop_y,
                 crop_confidence=f"{result.crop_confidence:.3f}", hfw_um=f"{hfw:g}",
@@ -259,6 +392,9 @@ def main(argv=None) -> int:
                 scale_um=f"{scale:g}",
                 scale_confidence=("manual" if supplied_scale is not None else f"{result.scale_confidence:.3f}"),
                 bar_pixels=round(image.width * scale / hfw),
+                effective_dpi=audit_data.get("effective_dpi", ""),
+                output_bytes=destination.stat().st_size,
+                vendor=result.vendor_hint or "",
                 warnings=" | ".join(result.warnings + [
                     f"Enhancement preset: {args.enhancement}",
                     f"Scale position: {args.scale_position}",
@@ -270,6 +406,13 @@ def main(argv=None) -> int:
         finally:
             record["elapsed_seconds"] = f"{time.perf_counter() - started:.3f}"
             records.append(record)
+            manifest["items"][str(source)] = {
+                "source": str(source), "source_sha256": record.get("source_sha256", ""),
+                "settings_sha256": settings_sha, "status": record["status"],
+                "output": record["output"], "error": record.get("error", ""),
+                "updated_utc": datetime.now(timezone.utc).isoformat(),
+            }
+            _write_manifest(manifest_path, manifest)
             _emit(record, args.jsonl)
             if not args.no_report:
                 write_report(report_path, records)
@@ -278,6 +421,22 @@ def main(argv=None) -> int:
 
     if records:
         create_qc_sheet(records, args.output / "batch_qc.jpg")
+        summary = {
+            "tool": "SEM Ready",
+            "completed_utc": datetime.now(timezone.utc).isoformat(),
+            "settings": settings_payload,
+            "settings_sha256": settings_sha,
+            "counts": {
+                "ok": sum(r["status"] == "ok" for r in records),
+                "skipped": sum(r["status"] == "skipped" for r in records),
+                "failed": sum(r["status"] == "error" for r in records),
+            },
+            "report": str(report_path.resolve()),
+            "qc_sheet": str((args.output / "batch_qc.jpg").resolve()),
+            "manifest": str(manifest_path.resolve()),
+        }
+        (args.output / "project_summary.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     if not args.jsonl:
         ok = sum(r["status"] == "ok" for r in records)
         skipped = sum(r["status"] == "skipped" for r in records)

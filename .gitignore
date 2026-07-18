@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 .venv/
 .pytest_cache/
+build/
+dist/
+*.egg-info/
 
 # EasyOCR models are downloaded locally on first use
 .EasyOCR/

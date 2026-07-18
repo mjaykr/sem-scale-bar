@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sem-ready"
+version = "2.0.0"
+description = "Automated publication-ready SEM cropping, calibration, enhancement, and export"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+authors = [{name = "Mirtunjay Kumar"}]
+dependencies = [
+  "easyocr==1.7.2",
+  "opencv-python-headless>=4.8",
+  "Pillow>=10.0",
+  "numpy>=1.24",
+  "openpyxl>=3.1",
+]
+
+[project.scripts]
+sem-ready = "cli:main"
+sem-ready-gui = "app:main"
+sem-ready-watch = "watch_folder:main"
+sem-ready-figure = "figure_builder:main"
+
+[tool.setuptools]
+py-modules = ["sem_ready", "cli", "app", "watch_folder", "figure_builder"]

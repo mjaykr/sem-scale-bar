@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import queue
 from pathlib import Path
 import threading
@@ -12,7 +13,8 @@ from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 
 from sem_ready import (Analysis, EnhancementOptions, SUPPORTED_EXTENSIONS, analyze,
-                       create_qc_sheet, export, nice_scale_value, render)
+                       create_qc_sheet, export, nice_scale_value, publication_profile,
+                       render)
 from cli import REPORT_FIELDS, discover_inputs, write_report
 
 
@@ -40,6 +42,9 @@ class SEMReadyApp(tk.Tk):
         self.journal_preset_var = tk.StringVar(value="Quarter A4 · 14 pt")
         self.auto_nice_scale_var = tk.BooleanVar(value=False)
         self.batch_format_var = tk.StringVar(value="tif")
+        self.export_profile_var = tk.StringVar(value="original")
+        self.max_file_mb_var = tk.StringVar(value="")
+        self.strict_dpi_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="Add images or folders for automatic processing.")
         self._build()
         self.enhancement_preset_var.trace_add("write", lambda *_: self.refresh_preview())
@@ -99,24 +104,35 @@ class SEMReadyApp(tk.Tk):
                      state="readonly", width=18).grid(row=5, column=1, sticky="e", pady=2)
         ttk.Label(automatic_tab, text="Scale position").grid(row=6, column=0, sticky="w")
         ttk.Combobox(automatic_tab, textvariable=self.scale_position_var,
-                     values=("bottom-right", "bottom-left", "top-right", "top-left"),
+                     values=("auto", "bottom-right", "bottom-left", "top-right", "top-left"),
                      state="readonly", width=18).grid(row=6, column=1, sticky="e", pady=2)
         ttk.Label(automatic_tab, text="Output format").grid(row=7, column=0, sticky="w")
         ttk.Combobox(automatic_tab, textvariable=self.batch_format_var,
                      values=("tif", "png", "jpg"), state="readonly", width=18).grid(
                          row=7, column=1, sticky="e", pady=2)
+        ttk.Label(automatic_tab, text="Size profile").grid(row=8, column=0, sticky="w")
+        ttk.Combobox(automatic_tab, textvariable=self.export_profile_var,
+                     values=("original", "quarter-a4", "single-column", "double-column",
+                             "high-resolution"), state="readonly", width=18).grid(
+                                 row=8, column=1, sticky="e", pady=2)
+        ttk.Label(automatic_tab, text="Max JPEG MB").grid(row=9, column=0, sticky="w")
+        ttk.Entry(automatic_tab, textvariable=self.max_file_mb_var, width=18).grid(
+            row=9, column=1, sticky="e", pady=2)
         options = ttk.Frame(automatic_tab)
-        options.grid(row=8, column=0, columnspan=2, sticky="ew")
+        options.grid(row=10, column=0, columnspan=2, sticky="ew")
         ttk.Checkbutton(options, text="Include subfolders", variable=self.batch_recursive_var).pack(side="left")
         ttk.Checkbutton(options, text="Overwrite", variable=self.batch_overwrite_var).pack(side="right")
         ttk.Checkbutton(automatic_tab, text="Choose a rounded scale value automatically",
                         variable=self.auto_nice_scale_var).grid(
-                            row=9, column=0, columnspan=2, sticky="w", pady=(3, 0))
+                            row=11, column=0, columnspan=2, sticky="w", pady=(3, 0))
+        ttk.Checkbutton(automatic_tab, text="Require profile DPI",
+                        variable=self.strict_dpi_var).grid(
+                            row=12, column=0, columnspan=2, sticky="w")
         self.batch_button = ttk.Button(
             automatic_tab, text="Automatically process all", command=self.start_batch)
-        self.batch_button.grid(row=10, column=0, columnspan=2, sticky="ew", pady=(6, 4))
+        self.batch_button.grid(row=13, column=0, columnspan=2, sticky="ew", pady=(6, 4))
         self.batch_progress = ttk.Progressbar(automatic_tab, mode="determinate")
-        self.batch_progress.grid(row=11, column=0, columnspan=2, sticky="ew")
+        self.batch_progress.grid(row=14, column=0, columnspan=2, sticky="ew")
         automatic_tab.columnconfigure(0, weight=1)
 
         ttk.Button(individual_tab, text="Choose one SEM image…", command=self.choose).pack(fill="x")
@@ -157,13 +173,22 @@ class SEMReadyApp(tk.Tk):
                      state="readonly", width=18).grid(row=2, column=1, sticky="e")
         ttk.Label(out, text="Scale position").grid(row=3, column=0, sticky="w", pady=2)
         ttk.Combobox(out, textvariable=self.scale_position_var,
-                     values=("bottom-right", "bottom-left", "top-right", "top-left"),
+                     values=("auto", "bottom-right", "bottom-left", "top-right", "top-left"),
                      state="readonly", width=18).grid(row=3, column=1, sticky="e")
         ttk.Checkbutton(out, text="Automatically choose rounded scale",
                         variable=self.auto_nice_scale_var, command=self.refresh_preview).grid(
                             row=4, column=0, columnspan=2, sticky="w", pady=(3, 0))
+        ttk.Label(out, text="Size profile").grid(row=5, column=0, sticky="w", pady=2)
+        ttk.Combobox(out, textvariable=self.export_profile_var,
+                     values=("original", "quarter-a4", "single-column", "double-column",
+                             "high-resolution"), state="readonly", width=18).grid(
+                                 row=5, column=1, sticky="e")
+        ttk.Label(out, text="Max JPEG MB").grid(row=6, column=0, sticky="w", pady=2)
+        ttk.Entry(out, textvariable=self.max_file_mb_var, width=10).grid(row=6, column=1, sticky="e")
+        ttk.Checkbutton(out, text="Require profile DPI", variable=self.strict_dpi_var).grid(
+            row=7, column=0, columnspan=2, sticky="w")
         ttk.Button(out, text="Export image…", command=self.save).grid(
-            row=5, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+            row=8, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         out.columnconfigure(1, weight=1)
 
         ttk.Label(preview, textvariable=self.status_var, anchor="w").grid(row=0, column=0, sticky="ew", pady=(0, 8))
@@ -257,8 +282,13 @@ class SEMReadyApp(tk.Tk):
             dpi = int(self.dpi_var.get())
             if not 72 <= dpi <= 2400:
                 raise ValueError
+            max_file_mb = (float(self.max_file_mb_var.get())
+                           if self.max_file_mb_var.get().strip() else None)
+            if max_file_mb is not None and max_file_mb <= 0:
+                raise ValueError
         except ValueError:
-            messagebox.showerror("Invalid DPI", "DPI must be between 72 and 2400.")
+            messagebox.showerror("Invalid export settings",
+                                 "DPI must be 72–2400 and maximum file size must be positive.")
             return
         self.batch_button.state(["disabled"])
         self.batch_progress["value"] = 0
@@ -270,7 +300,8 @@ class SEMReadyApp(tk.Tk):
             args=(inputs, output_name, self.batch_recursive_var.get(),
                   self.batch_overwrite_var.get(), dpi, self.enhancement_preset_var.get(),
                   self.scale_position_var.get(), label_pt, figure_width_mm,
-                  self.auto_nice_scale_var.get(), self.batch_format_var.get()),
+                  self.auto_nice_scale_var.get(), self.batch_format_var.get(),
+                  self.export_profile_var.get(), max_file_mb, self.strict_dpi_var.get()),
             daemon=True,
         ).start()
 
@@ -278,7 +309,8 @@ class SEMReadyApp(tk.Tk):
                       overwrite: bool, dpi: int, enhancement_preset: str = "Raw (no enhancement)",
                       position: str = "bottom-right", label_pt: float = 14.0,
                       figure_width_mm: float = 105.0, auto_nice_scale: bool = False,
-                      output_format: str = "tif"):
+                      output_format: str = "tif", export_profile: str = "original",
+                      max_file_mb: float | None = None, strict_dpi: bool = False):
         try:
             job_map: dict[Path, Path] = {}
             problems: list[str] = []
@@ -333,7 +365,10 @@ class SEMReadyApp(tk.Tk):
                         export(image, destination, result, result.hfw_um, scale_um,
                                "black", dpi, audit=True, enhancements=enhancement_options,
                                position=position, label_pt=label_pt,
-                               figure_width_mm=figure_width_mm)
+                               figure_width_mm=figure_width_mm, profile=export_profile,
+                               max_file_mb=max_file_mb, strict_dpi=strict_dpi)
+                        audit_path = destination.with_suffix(destination.suffix + ".json")
+                        audit_data = json.loads(audit_path.read_text(encoding="utf-8"))
                         record.update(
                             status="ok", crop_y=result.crop_y,
                             crop_confidence=f"{result.crop_confidence:.3f}",
@@ -343,6 +378,10 @@ class SEMReadyApp(tk.Tk):
                             scale_confidence=("automatic-rounded" if auto_nice_scale
                                               else f"{result.scale_confidence:.3f}"),
                             bar_pixels=round(image.width * scale_um / result.hfw_um),
+                            effective_dpi=audit_data.get("effective_dpi", ""),
+                            output_bytes=destination.stat().st_size,
+                            vendor=result.vendor_hint or "",
+                            profile=export_profile,
                             warnings=" | ".join(result.warnings + [
                                 f"Enhancement preset: {enhancement_preset}",
                                 f"Scale position: {position}",
@@ -440,11 +479,15 @@ class SEMReadyApp(tk.Tk):
             crop_y, hfw, scale, _ = self._values()
             self.analysis.crop_y = crop_y
             label_pt, figure_width_mm = self._journal_settings(self.journal_preset_var.get())
+            profile = publication_profile(self.export_profile_var.get())
+            output_width = (round(profile.figure_width_mm / 25.4 * profile.target_dpi)
+                            if profile.figure_width_mm and profile.target_dpi else None)
             rendered, bar_px = render(
                 self.image, crop_y, hfw, scale, "black",
                 enhancements=self._enhancement_options(self.enhancement_preset_var.get()),
                 position=self.scale_position_var.get(), label_pt=label_pt,
-                figure_width_mm=figure_width_mm)
+                figure_width_mm=profile.figure_width_mm or figure_width_mm,
+                output_width_px=output_width)
         except (ValueError, tk.TclError):
             return
         rendered.thumbnail((self.canvas.winfo_width() - 24, self.canvas.winfo_height() - 24), Image.Resampling.LANCZOS)
@@ -460,6 +503,8 @@ class SEMReadyApp(tk.Tk):
             self.analysis.crop_y = crop_y
             label_pt, figure_width_mm = self._journal_settings(self.journal_preset_var.get())
             enhancements = self._enhancement_options(self.enhancement_preset_var.get())
+            max_file_mb = (float(self.max_file_mb_var.get())
+                           if self.max_file_mb_var.get().strip() else None)
             render(self.image, crop_y, hfw, scale, "black", enhancements=enhancements,
                    position=self.scale_position_var.get(), label_pt=label_pt,
                    figure_width_mm=figure_width_mm)
@@ -477,13 +522,26 @@ class SEMReadyApp(tk.Tk):
             export(self.image, destination, self.analysis, hfw, scale,
                    "black", dpi, audit=True, enhancements=enhancements,
                    position=self.scale_position_var.get(), label_pt=label_pt,
-                   figure_width_mm=figure_width_mm)
+                   figure_width_mm=figure_width_mm, profile=self.export_profile_var.get(),
+                   max_file_mb=max_file_mb, strict_dpi=self.strict_dpi_var.get())
         except Exception as exc:
             messagebox.showerror("Export failed", str(exc))
             return
-        self.status_var.set(f"Exported {destination}")
-        messagebox.showinfo("Export complete", f"Saved image and calibration audit record:\n{destination}")
+        size_mb = Path(destination).stat().st_size / 1024 / 1024
+        audit_path = Path(destination).with_suffix(Path(destination).suffix + ".json")
+        audit_data = json.loads(audit_path.read_text(encoding="utf-8")) if audit_path.exists() else {}
+        effective = audit_data.get("effective_dpi")
+        self.status_var.set(f"Exported {destination} · {size_mb:.2f} MB")
+        messagebox.showinfo(
+            "Export complete",
+            f"Saved image and calibration audit record:\n{destination}\n\n"
+            f"File size: {size_mb:.2f} MB"
+            + (f"\nEffective resolution: {effective:.0f} DPI" if effective else ""))
+
+
+def main():
+    SEMReadyApp().mainloop()
 
 
 if __name__ == "__main__":
-    SEMReadyApp().mainloop()
+    main()

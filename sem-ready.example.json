@@ -1,0 +1,14 @@
+{
+  "inputs": ["incoming"],
+  "output": "publication_ready",
+  "recursive": true,
+  "format": "png",
+  "profile": "quarter-a4",
+  "enhancement": "balanced",
+  "scale_position": "auto",
+  "journal_preset": "quarter-a4",
+  "auto_scale": true,
+  "min_ocr_confidence": 0.2,
+  "strict_dpi": false,
+  "overwrite": false
+}

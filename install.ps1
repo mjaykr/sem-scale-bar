@@ -28,7 +28,7 @@ if (-not (Test-Path -LiteralPath ".venv\Scripts\python.exe")) {
 
 $venvPython = Join-Path $scriptRoot ".venv\Scripts\python.exe"
 & $venvPython -m pip install --upgrade pip
-& $venvPython -m pip install -r requirements.txt
+& $venvPython -m pip install -e .
 
 Write-Host "Installation complete. Start SEM Ready with .\run_sem_ready.bat"
 if ($Launch) {

@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
 import hashlib
+import io
 import json
 import math
 from pathlib import Path
@@ -22,6 +23,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 SUPPORTED_EXTENSIONS = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp"}
 UNIT_TO_UM = {"nm": 0.001, "um": 1.0, "mm": 1000.0}
+__version__ = "2.0.0"
 
 
 @dataclass
@@ -56,6 +58,10 @@ class Analysis:
     scale_confidence: float = 0.0
     tokens: list[OCRToken] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    embedded_metadata: dict = field(default_factory=dict)
+    vendor_hint: str | None = None
+    embedded_scale_pixels: int | None = None
+    calibration_error_percent: float | None = None
 
 
 @dataclass
@@ -72,8 +78,78 @@ class EnhancementOptions:
     clip_percent: float = 0.5
 
 
+@dataclass(frozen=True)
+class PublicationProfile:
+    name: str
+    figure_width_mm: float | None
+    target_dpi: int | None
+    description: str
+
+
+PUBLICATION_PROFILES = {
+    "original": PublicationProfile("original", None, None, "Original pixel dimensions"),
+    "quarter-a4": PublicationProfile("quarter-a4", 105.0, 300, "105 mm at 300 DPI"),
+    "single-column": PublicationProfile("single-column", 85.0, 300, "85 mm at 300 DPI"),
+    "double-column": PublicationProfile("double-column", 178.0, 300, "178 mm at 300 DPI"),
+    "high-resolution": PublicationProfile("high-resolution", 105.0, 600, "105 mm at 600 DPI"),
+}
+
+
+def publication_profile(name: str) -> PublicationProfile:
+    try:
+        return PUBLICATION_PROFILES[name]
+    except KeyError as exc:
+        raise ValueError(f"Unknown publication profile: {name}") from exc
+
+
 def _gray_array(image: Image.Image) -> np.ndarray:
     return np.asarray(image.convert("L"), dtype=np.uint8)
+
+
+def _extract_embedded_metadata(image: Image.Image) -> tuple[dict, str]:
+    metadata: dict[str, str] = {}
+    for key, value in image.info.items():
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="ignore")
+        if isinstance(value, (str, int, float)) and len(str(value)) < 20000:
+            metadata[str(key)] = str(value)
+    tags = getattr(image, "tag_v2", None)
+    if tags:
+        for key in tags:
+            try:
+                value = tags.get(key)
+                if isinstance(value, bytes):
+                    value = value.decode("utf-8", errors="ignore")
+                if isinstance(value, (str, int, float, tuple)) and len(str(value)) < 20000:
+                    metadata[f"tiff_tag_{key}"] = str(value)
+            except Exception:
+                continue
+    text = "\n".join(metadata.values())
+    return metadata, text
+
+
+def _metadata_measurement(text: str, labels: tuple[str, ...]) -> float | None:
+    for label in labels:
+        match = re.search(
+            rf"{label}[^\d]{{0,20}}(\d+(?:[.,]\d+)?)\s*(nm|[uµμ]m|mm)",
+            text, re.IGNORECASE)
+        if match:
+            unit, _ = _unit(match.group(2))
+            return float(match.group(1).replace(",", ".")) * UNIT_TO_UM[unit]
+    return None
+
+
+def _vendor_hint(text: str) -> str | None:
+    lower = text.lower()
+    for needles, vendor in [
+        (("fei", "thermo fisher", "helios", "quanta", "nova"), "FEI/Thermo Fisher"),
+        (("zeiss", "carl zeiss", "sigma", "gemini"), "Zeiss"),
+        (("jeol",), "JEOL"), (("hitachi",), "Hitachi"),
+        (("tescan", "mira", "vega"), "Tescan"),
+    ]:
+        if any(needle in lower for needle in needles):
+            return vendor
+    return None
 
 
 def detect_panel_boundary(image: Image.Image) -> tuple[int, float]:
@@ -141,6 +217,25 @@ def read_footer(panel: Image.Image) -> list[OCRToken]:
             cy=float(points[:, 1].mean() / scale),
         ))
     return tokens
+
+
+def detect_embedded_scale_pixels(panel: Image.Image, expected_pixels: float | None = None) -> int | None:
+    """Estimate the original footer bar length for an independent calibration check."""
+    gray = _gray_array(panel)
+    edges = cv2.Canny(gray, 60, 180)
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=max(20, panel.width // 15),
+                            minLineLength=max(20, panel.width // 12), maxLineGap=12)
+    candidates = []
+    if lines is not None:
+        for x1, y1, x2, y2 in np.asarray(lines).reshape(-1, 4):
+            length = abs(int(x2) - int(x1))
+            if (abs(int(y2) - int(y1)) <= 2 and panel.height * 0.05 < y1 < panel.height * 0.60
+                    and panel.width * 0.08 <= length <= panel.width * 0.70):
+                candidates.append(length)
+    if not candidates:
+        return None
+    return (min(candidates, key=lambda value: abs(value - expected_pixels))
+            if expected_pixels else max(candidates))
 
 
 _MEASUREMENT = re.compile(
@@ -228,6 +323,7 @@ def analyze(path: str | Path, run_ocr: bool = True, crop_y: int | None = None,
             allow_manual_fallback: bool = False) -> tuple[Image.Image, Analysis]:
     source = Path(path)
     with Image.open(source) as opened:
+        embedded_metadata, metadata_text = _extract_embedded_metadata(opened)
         image = opened.copy()
     boundary_warning = None
     if crop_y is not None:
@@ -243,17 +339,39 @@ def analyze(path: str | Path, run_ocr: bool = True, crop_y: int | None = None,
             crop_y, crop_confidence = int(image.height * 0.90), 0.0
             boundary_warning = f"{exc} A provisional 90% crop is shown; set the crop row manually."
     result = Analysis(str(source.resolve()), image.width, image.height, crop_y, crop_confidence)
+    result.embedded_metadata = embedded_metadata
+    result.vendor_hint = _vendor_hint(metadata_text)
+    metadata_hfw = _metadata_measurement(metadata_text, (r"HFW", r"horizontal field width"))
+    metadata_scale = _metadata_measurement(metadata_text, (r"scale(?:\s*bar)?",))
+    if metadata_hfw:
+        result.hfw_um, result.hfw_confidence = metadata_hfw, 1.0
+        result.warnings.append("HFW read from embedded image metadata.")
+    if metadata_scale:
+        result.scale_um, result.scale_confidence = metadata_scale, 1.0
+        result.warnings.append("Scale value read from embedded image metadata.")
     if boundary_warning:
         result.warnings.append(boundary_warning)
     if run_ocr:
-        tokens = read_footer(image.crop((0, crop_y, image.width, image.height)))
+        footer = image.crop((0, crop_y, image.width, image.height))
+        tokens = read_footer(footer)
         hfw, scale, warnings = interpret_calibration(tokens, image.width)
         result.tokens = tokens
-        result.warnings.extend(warnings)
-        if hfw:
+        result.warnings.extend(warning for warning in warnings
+                               if not (metadata_hfw and warning.startswith("HFW could not"))
+                               and not (metadata_scale and warning.startswith("Original scale")))
+        if hfw and not metadata_hfw:
             result.hfw_um, result.hfw_confidence = hfw.value_um, hfw.confidence
-        if scale:
+        if scale and not metadata_scale:
             result.scale_um, result.scale_confidence = scale.value_um, scale.confidence
+        expected = (image.width * result.scale_um / result.hfw_um
+                    if result.hfw_um and result.scale_um else None)
+        result.embedded_scale_pixels = detect_embedded_scale_pixels(footer, expected)
+        if expected and result.embedded_scale_pixels:
+            error = abs(result.embedded_scale_pixels - expected) / expected * 100
+            result.calibration_error_percent = round(error, 2)
+            if error > 35:
+                result.warnings.append(
+                    f"Embedded bar cross-check differs by {error:.1f}%; review OCR calibration.")
     return image, result
 
 
@@ -355,10 +473,28 @@ def enhance_image(image: Image.Image, options: EnhancementOptions | None = None
     return (result.convert("L") if source_mode == "L" else result), metrics
 
 
+def least_busy_corner(image: Image.Image) -> str:
+    """Choose the corner with the lowest texture/edge density for annotation."""
+    gray = _gray_array(image)
+    height, width = gray.shape
+    patch_w, patch_h = max(40, int(width * 0.38)), max(40, int(height * 0.28))
+    patches = {
+        "top-left": gray[:patch_h, :patch_w],
+        "top-right": gray[:patch_h, width - patch_w:],
+        "bottom-left": gray[height - patch_h:, :patch_w],
+        "bottom-right": gray[height - patch_h:, width - patch_w:],
+    }
+    def score(patch):
+        laplacian = cv2.Laplacian(patch, cv2.CV_32F)
+        return float(np.std(patch) + 1.5 * np.mean(np.abs(laplacian)))
+    return min(patches, key=lambda name: score(patches[name]))
+
+
 def _render_with_metadata(
     image: Image.Image, crop_y: int, hfw_um: float, scale_um: float,
     enhancements: EnhancementOptions | None = None, position: str = "bottom-right",
     label_pt: float = 14.0, figure_width_mm: float = 105.0,
+    output_width_px: int | None = None,
 ) -> tuple[Image.Image, int, dict]:
     if not (0 < crop_y <= image.height):
         raise ValueError("Crop row is outside the image.")
@@ -366,6 +502,11 @@ def _render_with_metadata(
         raise ValueError("HFW and scale value must both be positive.")
     cropped = image.crop((0, 0, image.width, crop_y))
     cropped, enhancement_metrics = enhance_image(cropped, enhancements)
+    if output_width_px and output_width_px < cropped.width:
+        output_height = max(1, round(cropped.height * output_width_px / cropped.width))
+        enhancement_metrics["resampled_from_px"] = list(cropped.size)
+        enhancement_metrics["resampled_to_px"] = [output_width_px, output_height]
+        cropped = cropped.resize((output_width_px, output_height), Image.Resampling.LANCZOS)
     bar_pixels = int(round(cropped.width * scale_um / hfw_um))
     if not (cropped.width * 0.03 <= bar_pixels <= cropped.width * 0.75):
         raise ValueError(
@@ -380,6 +521,9 @@ def _render_with_metadata(
     draw = ImageDraw.Draw(overlay)
     margin = max(14, round(cropped.width * 0.035))
     thickness = max(4, round(cropped.width * 0.006))
+    if position == "auto":
+        position = least_busy_corner(cropped)
+    enhancement_metrics["scale_position"] = position
     if position not in {"bottom-right", "bottom-left", "top-right", "top-left"}:
         raise ValueError("Unsupported scale-bar position.")
     if not (6 <= label_pt <= 36) or not (40 <= figure_width_mm <= 300):
@@ -429,35 +573,113 @@ def _render_with_metadata(
 def render(image: Image.Image, crop_y: int, hfw_um: float, scale_um: float,
            color: str = "black", enhancements: EnhancementOptions | None = None,
            position: str = "bottom-right", label_pt: float = 14.0,
-           figure_width_mm: float = 105.0) -> tuple[Image.Image, int]:
+           figure_width_mm: float = 105.0,
+           output_width_px: int | None = None) -> tuple[Image.Image, int]:
     output, bar_pixels, _ = _render_with_metadata(
-        image, crop_y, hfw_um, scale_um, enhancements, position, label_pt, figure_width_mm)
+        image, crop_y, hfw_um, scale_um, enhancements, position, label_pt,
+        figure_width_mm, output_width_px)
     return output, bar_pixels
+
+
+def _safe_grayscale(image: Image.Image) -> tuple[Image.Image, bool]:
+    """Collapse redundant RGB channels without changing genuine colour images."""
+    if image.mode != "RGB":
+        return image, False
+    array = np.asarray(image, dtype=np.int16)
+    channel_delta = max(float(np.mean(np.abs(array[:, :, 0] - array[:, :, 1]))),
+                        float(np.mean(np.abs(array[:, :, 1] - array[:, :, 2]))))
+    if channel_delta <= 1.0:
+        return image.convert("L"), True
+    return image, False
+
+
+def _save_optimized(image: Image.Image, destination: Path, dpi: int,
+                    max_file_mb: float | None = None, jpeg_quality: int = 95) -> dict:
+    suffix = destination.suffix.lower()
+    settings: dict = {"dpi": [dpi, dpi]}
+    if suffix in {".jpg", ".jpeg"}:
+        if image.mode not in {"RGB", "L"}:
+            image = image.convert("RGB")
+        quality = max(70, min(100, jpeg_quality))
+        target_bytes = int(max_file_mb * 1024 * 1024) if max_file_mb else None
+        encoded = None
+        while quality >= 82:
+            buffer = io.BytesIO()
+            image.save(buffer, format="JPEG", quality=quality, subsampling=0,
+                       optimize=True, dpi=(dpi, dpi))
+            encoded = buffer.getvalue()
+            if target_bytes is None or len(encoded) <= target_bytes:
+                break
+            quality -= 2
+        decoded = np.asarray(Image.open(io.BytesIO(encoded)).convert(image.mode), dtype=np.float32)
+        original = np.asarray(image, dtype=np.float32)
+        mse = float(np.mean((original - decoded) ** 2))
+        psnr = float("inf") if mse == 0 else 20 * math.log10(255.0 / math.sqrt(mse))
+        # Scientific texture is sensitive to JPEG artifacts. If the requested
+        # size would push PSNR below 35 dB, keep the safer encoding and report
+        # that the size target was not met.
+        if psnr < 35 and quality < jpeg_quality:
+            quality = max(quality, min(jpeg_quality, 92))
+            buffer = io.BytesIO()
+            image.save(buffer, format="JPEG", quality=quality, subsampling=0,
+                       optimize=True, dpi=(dpi, dpi))
+            encoded = buffer.getvalue()
+            decoded = np.asarray(Image.open(io.BytesIO(encoded)).convert(image.mode), dtype=np.float32)
+            mse = float(np.mean((original - decoded) ** 2))
+            psnr = float("inf") if mse == 0 else 20 * math.log10(255.0 / math.sqrt(mse))
+        destination.write_bytes(encoded or b"")
+        settings.update(compression="jpeg", quality=quality, subsampling=0,
+                        psnr_db=(round(psnr, 2) if math.isfinite(psnr) else "lossless"),
+                        size_target_met=(target_bytes is None or len(encoded) <= target_bytes),
+                        quality_guard_min_psnr_db=35)
+    elif suffix in {".tif", ".tiff"}:
+        image.save(destination, dpi=(dpi, dpi), compression="tiff_lzw")
+        settings["compression"] = "tiff_lzw"
+    elif suffix == ".png":
+        image.save(destination, dpi=(dpi, dpi), optimize=True, compress_level=9)
+        settings["compression"] = "png_deflate_9"
+    else:
+        image.save(destination, dpi=(dpi, dpi))
+        settings["compression"] = "format_default"
+    settings["file_bytes"] = destination.stat().st_size
+    settings["file_megabytes"] = round(destination.stat().st_size / 1024 / 1024, 3)
+    return settings
 
 
 def export(image: Image.Image, destination: str | Path, analysis: Analysis,
            hfw_um: float, scale_um: float, color: str = "black", dpi: int = 600,
            audit: bool = True, enhancements: EnhancementOptions | None = None,
            position: str = "bottom-right", label_pt: float = 14.0,
-           figure_width_mm: float = 105.0) -> Path:
+           figure_width_mm: float = 105.0, profile: str = "original",
+           auto_grayscale: bool = True, max_file_mb: float | None = None,
+           jpeg_quality: int = 95, strict_dpi: bool = False) -> Path:
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    profile_info = publication_profile(profile)
+    target_width = None
+    intended_width_mm = profile_info.figure_width_mm or figure_width_mm
+    requested_dpi = profile_info.target_dpi or dpi
+    if profile_info.figure_width_mm and profile_info.target_dpi:
+        target_width = round(profile_info.figure_width_mm / 25.4 * profile_info.target_dpi)
     output, bar_pixels, enhancement_metrics = _render_with_metadata(
         image, analysis.crop_y, hfw_um, scale_um, enhancements, position,
-        label_pt, figure_width_mm)
-    save_args: dict = {"dpi": (dpi, dpi)}
-    if destination.suffix.lower() in {".jpg", ".jpeg"}:
-        save_args.update(quality=95, subsampling=0)
-        if output.mode not in {"RGB", "L"}:
-            output = output.convert("RGB")
-    elif destination.suffix.lower() in {".tif", ".tiff"}:
-        save_args.update(compression="tiff_lzw")
-    output.save(destination, **save_args)
+        label_pt, intended_width_mm, target_width)
+    effective_dpi = output.width / (intended_width_mm / 25.4)
+    if strict_dpi and effective_dpi + 0.5 < requested_dpi:
+        raise ValueError(
+            f"Source supports only {effective_dpi:.0f} DPI at {intended_width_mm:g} mm; "
+            f"the {profile} profile requires {requested_dpi} DPI."
+        )
+    converted_grayscale = False
+    if auto_grayscale:
+        output, converted_grayscale = _safe_grayscale(output)
+    metadata_dpi = round(effective_dpi) if profile_info.target_dpi else dpi
+    encoding = _save_optimized(output, destination, metadata_dpi, max_file_mb, jpeg_quality)
 
     if audit:
         source_bytes = Path(analysis.source).read_bytes()
         record = {
-            "tool": "SEM Ready 1.0",
+            "tool": f"SEM Ready {__version__}",
             "created_utc": datetime.now(timezone.utc).isoformat(),
             "source": analysis.source,
             "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
@@ -469,9 +691,17 @@ def export(image: Image.Image, destination: str | Path, analysis: Analysis,
             "scale_um": scale_um,
             "bar_pixels": bar_pixels,
             "calibration_formula": "bar_pixels = output_width_px * scale_um / hfw_um",
-            "dpi_metadata": dpi,
+            "dpi_metadata": metadata_dpi,
+            "publication_profile": asdict(profile_info),
+            "intended_figure_width_mm": intended_width_mm,
+            "effective_dpi": round(effective_dpi, 2),
+            "requested_dpi": requested_dpi,
+            "strict_dpi": strict_dpi,
+            "automatic_grayscale_conversion": converted_grayscale,
+            "encoding": encoding,
             "scale_style": {
-                "position": position,
+                "position": enhancement_metrics.get("scale_position", position),
+                "requested_position": position,
                 "label_pt_at_figure_width": label_pt,
                 "figure_width_mm": figure_width_mm,
                 "line_color": "black",
@@ -479,6 +709,10 @@ def export(image: Image.Image, destination: str | Path, analysis: Analysis,
             },
             "enhancement_options": asdict(enhancements or EnhancementOptions()),
             "enhancement_metrics": enhancement_metrics,
+            "vendor_hint": analysis.vendor_hint,
+            "embedded_metadata": analysis.embedded_metadata,
+            "embedded_scale_pixels": analysis.embedded_scale_pixels,
+            "calibration_crosscheck_error_percent": analysis.calibration_error_percent,
             "ocr_tokens": [asdict(t) for t in analysis.tokens],
             "warnings": analysis.warnings,
         }
