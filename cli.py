@@ -32,7 +32,7 @@ def parser() -> argparse.ArgumentParser:
     )
     p.add_argument("inputs", nargs="*", help="Images, directories, or wildcard patterns")
     p.add_argument("--config", type=Path, help="JSON settings profile")
-    p.add_argument("-o", "--output", type=Path, default=Path("publication_ready"))
+    p.add_argument("-o", "--output", type=Path, default=Path("Publication_ready"))
     p.add_argument("--recursive", action="store_true", help="Search input directories recursively")
     p.add_argument("--overrides-csv", type=Path,
                    help="Per-image values: source/filename,hfw_um,scale_um,crop_y")
@@ -44,10 +44,10 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--color", choices=("white", "black"), default="black",
                    help=argparse.SUPPRESS)
     p.add_argument("--dpi", type=int, default=600)
-    p.add_argument("--format", choices=("tif", "png", "jpg"), default="tif")
+    p.add_argument("--format", choices=("tif", "png", "jpg"), default="png")
     p.add_argument("--name-template", default="{stem}_publication",
                    help="Output name using {stem}, {profile}, and {format}")
-    p.add_argument("--profile", choices=tuple(PUBLICATION_PROFILES), default="original",
+    p.add_argument("--profile", choices=tuple(PUBLICATION_PROFILES), default="single-column",
                    help="Print-size/resolution optimization profile")
     p.add_argument("--max-file-mb", type=float, help="JPEG size target in MB")
     p.add_argument("--jpeg-quality", type=int, default=95)
@@ -60,14 +60,15 @@ def parser() -> argparse.ArgumentParser:
                    choices=("auto", "bottom-right", "bottom-left", "top-right", "top-left"),
                    default="bottom-right")
     p.add_argument("--journal-preset", choices=("quarter-a4", "single-column", "double-column"),
-                   default="quarter-a4")
+                   default="single-column")
     p.add_argument("--auto-scale", action="store_true",
                    help="Replace the OCR bar value with a rounded 1/2/5 scale")
     p.add_argument("--min-ocr-confidence", type=float, default=0.20,
                    help="Reject lower-confidence automatic HFW/scale reads")
     p.add_argument("--no-ocr", action="store_true",
                    help="Never run OCR; calibration must be supplied by overrides")
-    p.add_argument("--overwrite", action="store_true", help="Replace existing outputs")
+    p.add_argument("--overwrite", action=argparse.BooleanOptionalAction, default=True,
+                   help="Replace existing outputs; use --no-overwrite to keep them")
     p.add_argument("--manifest", type=Path,
                    help="Resume/deduplication manifest (default: OUTPUT/.sem_ready_manifest.json)")
     p.add_argument("--retry-failed", action="store_true",
@@ -254,7 +255,7 @@ def _parse_args(argv=None):
     if not args.inputs:
         args.inputs = [str(value) for value in config_inputs]
     if not args.inputs:
-        command_parser.error("provide input images/folders or set 'inputs' in --config")
+        args.inputs = ["."]
     return args
 
 

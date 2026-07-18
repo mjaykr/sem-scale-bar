@@ -102,6 +102,17 @@ class SEMReadyTests(unittest.TestCase):
             self.assertEqual(args.inputs, ["sample.tif"])
             self.assertEqual(args.profile, "quarter-a4")
 
+    def test_zero_argument_terminal_defaults(self):
+        args = _parse_args([])
+        self.assertEqual(args.inputs, ["."])
+        self.assertEqual(str(args.output), "Publication_ready")
+        self.assertEqual(args.enhancement, "raw")
+        self.assertEqual(args.journal_preset, "single-column")
+        self.assertEqual(args.scale_position, "bottom-right")
+        self.assertEqual(args.format, "png")
+        self.assertEqual(args.profile, "single-column")
+        self.assertTrue(args.overwrite)
+
     def test_multi_panel_builder(self):
         with TemporaryDirectory() as folder:
             root = Path(folder)

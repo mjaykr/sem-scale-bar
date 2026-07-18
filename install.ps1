@@ -30,7 +30,18 @@ $venvPython = Join-Path $scriptRoot ".venv\Scripts\python.exe"
 & $venvPython -m pip install --upgrade pip
 & $venvPython -m pip install -e .
 
-Write-Host "Installation complete. Start SEM Ready with .\run_sem_ready.bat"
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+$pathEntries = @($userPath -split ";" | Where-Object { $_ })
+if ($pathEntries -notcontains $scriptRoot) {
+    $newUserPath = (($pathEntries + $scriptRoot) -join ";")
+    [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
+}
+if (($env:Path -split ";") -notcontains $scriptRoot) {
+    $env:Path = "$scriptRoot;$env:Path"
+}
+
+Write-Host "Installation complete. Open a new terminal and run 'sem-ready' from any image folder."
+Write-Host "Use .\run_sem_ready.bat to start the desktop interface."
 if ($Launch) {
     & $venvPython app.py
 }

@@ -2,6 +2,7 @@
 
 ## 2.0.0 — 2026-07-18
 
+- Added zero-argument `sem-ready` processing with publication-safe terminal defaults and PATH setup.
 - Added publication-size profiles with effective-DPI validation and no automatic upscaling.
 - Added safe grayscale conversion, optimized PNG/TIFF, JPEG size targeting, and PSNR guard.
 - Added metadata-first calibration, vendor hints, embedded-bar cross-checking, and automatic placement.

@@ -50,7 +50,8 @@ images. TIFF is recommended for publication output.
 4. Start the program by double-clicking `run_sem_ready.bat`.
 
 The installer creates a local `.venv` environment, so packages do not affect other
-Python projects on the computer.
+Python projects on the computer. It also adds this repository to your user PATH.
+Open a new terminal after installation so the updated PATH is available.
 
 ### Manual installation
 
@@ -148,6 +149,29 @@ selected print requirement.
 ## Command-line and automation
 
 The CLI is useful for scripts, laboratory acquisition pipelines, and Task Scheduler.
+
+### One-command current-folder processing
+
+Open a terminal in any folder containing SEM images and run:
+
+```powershell
+sem-ready
+```
+
+With no arguments, the command uses these defaults:
+
+| Setting | Default |
+| --- | --- |
+| Input | Every supported image in the current folder |
+| Output subfolder | `Publication_ready` |
+| Enhancement | Raw |
+| Journal size | Single column |
+| Scale position | Bottom right |
+| Output format | PNG |
+| Size profile | Single column |
+| Existing output | Overwritten |
+
+Use `sem-ready --no-overwrite` when existing results should be kept.
 
 ```powershell
 # Process every supported image in a folder
@@ -273,6 +297,7 @@ python -m unittest -v
 | `cli.py` | Non-interactive batch processing command. |
 | `sem_ready.py` | Image processing, OCR, calibration, enhancement, and export core. |
 | `run_sem_ready.bat` | Starts the desktop app, preferring `.venv` when present. |
+| `sem-ready.cmd` | PATH launcher for one-command terminal processing. |
 | `install.ps1` | Windows one-command installer. |
 | `run_batch.ps1` | Windows batch/Task Scheduler wrapper. |
 | `watch_folder.py` | Stable-file watch service for microscope export folders. |
