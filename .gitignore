@@ -17,6 +17,7 @@ dist/
 *.jpg
 *.jpeg
 *.bmp
+!assets/semfig-icon.png
 publication_ready/
 *_publication.*
 batch_report.csv
