@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import queue
 from pathlib import Path
+import sys
 import threading
 import time
 import tkinter as tk
@@ -22,6 +23,7 @@ class SEMReadyApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("SEMfig — calibrated publication images")
+        self._set_window_icon()
         self.geometry("1180x800")
         self.minsize(920, 680)
         self.image: Image.Image | None = None
@@ -51,6 +53,29 @@ class SEMReadyApp(tk.Tk):
         self.scale_position_var.trace_add("write", lambda *_: self.refresh_preview())
         self.journal_preset_var.trace_add("write", lambda *_: self.refresh_preview())
         self.after(100, self._poll)
+
+    def _set_window_icon(self):
+        """Use the SEMfig artwork in the title bar, taskbar, and app switcher."""
+        asset_roots = (
+            Path(__file__).resolve().parent / "assets",
+            Path(sys.prefix) / "share" / "semfig" / "assets",
+        )
+        for asset_root in asset_roots:
+            png_path = asset_root / "semfig-icon.png"
+            ico_path = asset_root / "semfig.ico"
+            if png_path.exists():
+                try:
+                    self._app_icon = ImageTk.PhotoImage(file=str(png_path))
+                    self.iconphoto(True, self._app_icon)
+                except (tk.TclError, OSError):
+                    pass
+            if sys.platform == "win32" and ico_path.exists():
+                try:
+                    self.iconbitmap(default=str(ico_path))
+                except tk.TclError:
+                    pass
+            if png_path.exists() or ico_path.exists():
+                break
 
     def _build(self):
         style = ttk.Style(self)

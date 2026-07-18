@@ -40,8 +40,22 @@ if (($env:Path -split ";") -notcontains $scriptRoot) {
     $env:Path = "$scriptRoot;$env:Path"
 }
 
+$desktopPath = [Environment]::GetFolderPath("Desktop")
+$shortcutPath = Join-Path $desktopPath "SEMfig GUI.lnk"
+$iconPath = Join-Path $scriptRoot "assets\semfig.ico"
+$launcherPath = Join-Path $scriptRoot "run_semfig.bat"
+$shell = New-Object -ComObject WScript.Shell
+$shortcut = $shell.CreateShortcut($shortcutPath)
+$shortcut.TargetPath = $launcherPath
+$shortcut.WorkingDirectory = $scriptRoot
+$shortcut.Description = "Turn raw SEM images into publication-ready figures"
+if (Test-Path -LiteralPath $iconPath) {
+    $shortcut.IconLocation = "$iconPath,0"
+}
+$shortcut.Save()
+
 Write-Host "Installation complete. Open a new terminal and run 'semfig' from any image folder."
-Write-Host "Use .\run_semfig.bat to start the desktop interface."
+Write-Host "Double-click 'SEMfig GUI' on the desktop to start the graphical interface."
 if ($Launch) {
     & $venvPython app.py
 }

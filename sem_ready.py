@@ -23,7 +23,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 SUPPORTED_EXTENSIONS = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp"}
 UNIT_TO_UM = {"nm": 0.001, "um": 1.0, "mm": 1000.0}
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 
 
 @dataclass

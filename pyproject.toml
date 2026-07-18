@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "semfig"
-version = "2.0.0"
+version = "2.0.1"
 description = "Automated publication-ready SEM cropping, calibration, enhancement, and export"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -31,3 +31,6 @@ sem-ready-figure = "figure_builder:main"
 
 [tool.setuptools]
 py-modules = ["sem_ready", "cli", "app", "watch_folder", "figure_builder"]
+
+[tool.setuptools.data-files]
+"share/semfig/assets" = ["assets/semfig-icon.png", "assets/semfig.ico"]

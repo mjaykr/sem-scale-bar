@@ -47,11 +47,14 @@ images. TIFF is recommended for publication output.
    PowerShell -ExecutionPolicy Bypass -File .\install.ps1
    ```
 
-4. Start the program by double-clicking `run_semfig.bat`.
+4. Start the program by double-clicking the **SEMfig GUI** desktop shortcut.
 
 The installer creates a local `.venv` environment, so packages do not affect other
 Python projects on the computer. It also adds this repository to your user PATH.
-Open a new terminal after installation so the updated PATH is available.
+Open a new terminal after installation so the updated PATH is available. The
+installer also creates the clearly labelled **SEMfig GUI** desktop shortcut using
+the SEMfig microscope-and-scale-bar icon. You can still launch the app directly by
+double-clicking `run_semfig.bat`.
 
 ### Manual installation
 

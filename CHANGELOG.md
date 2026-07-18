@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.1 — 2026-07-18
+
+- Added a distinctive SEMfig microscope-and-scale-bar application icon.
+- Applied the icon to the GUI window, taskbar, and packaged application assets.
+- Made the Windows installer create a clearly labelled `SEMfig GUI` desktop shortcut.
+
 ## 2.0.0 — 2026-07-18
 
 - Renamed the user-facing application and primary terminal command to `SEMfig` / `semfig`.
