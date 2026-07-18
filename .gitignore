@@ -1,23 +1,25 @@
-# Output
-processed/
-
-# Python
+# Python and local environments
 __pycache__/
-*.pyc
-*.pyo
-*.egg-info/
-dist/
-build/
+*.py[cod]
+.venv/
+.pytest_cache/
 
-# Debug files
-debug_*.png
-latex_test.png
-scalebar_check.png
+# EasyOCR models are downloaded locally on first use
+.EasyOCR/
 
-# OS
+# SEM source images and generated publication outputs stay local
+*.tif
+*.tiff
+*.png
+*.jpg
+*.jpeg
+*.bmp
+publication_ready/
+*_publication.*
+batch_report.csv
+batch_qc.jpg
+
+# OS/editor files
 .DS_Store
 Thumbs.db
-
-# Local test sandbox
-test/
-
+.vscode/
