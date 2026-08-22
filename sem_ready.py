@@ -319,6 +319,123 @@ def interpret_calibration(tokens: list[OCRToken], panel_width: int) -> tuple[
     return hfw, scale, warnings
 
 
+_MAGNIFICATION = re.compile(r"[xX×]\s*([0-9][0-9.,\u00a0 ]*[0-9])")
+
+# Legacy footers (older Zeiss/LEO style) often omit HFW entirely and OCR mangles
+# the bar label: "10pm", "1Opm" (letter O), "1p", "Sm", "3mmn".
+_FUZZY_LABEL = re.compile(
+    r"(?<![\dA-Za-z.])([0-9SOIl]{1,3})(?:[.,]([0-9]{1,2}))?\s*"
+    r"(?:[pP][mMnN]{1,2}|[pP]|[mMnN]{1,2})[a-z]{0,3}(?![a-zA-Z\d])"
+)
+_FUZZY_DIGIT_FIX = str.maketrans({"S": "5", "O": "0", "o": "0", "l": "1", "I": "1"})
+
+# Printed magnifications reference a fixed display width (Zeiss Polaroid ≈127 mm;
+# measured IIT-Kanpur Zeiss ≈119.5 mm), so HFW × mag must land in this band.
+_MAG_DISPLAY_BAND = (90_000.0, 165_000.0)  # µm·mag
+
+
+def parse_magnification(tokens: list[OCRToken]) -> tuple[float, float] | None:
+    """Return (magnification, confidence) from tokens like 'x7,000' or 'X1 000'."""
+    best = None
+    for token in tokens:
+        match = _MAGNIFICATION.search(token.text)
+        if not match:
+            continue
+        value = float(re.sub(r"[.,\s\u00a0]", "", match.group(1)))
+        if value >= 10 and (best is None or token.confidence > best[1]):
+            best = (value, token.confidence)
+    return best
+
+
+def detect_solid_bar(panel: Image.Image,
+                     expected_pixels: float | None = None) -> tuple[int, float, float] | None:
+    """Locate a solid horizontal scale bar drawn on the footer panel.
+
+    Returns (length_px, centre_x, centre_y) of the most plausible bar, else None.
+    """
+    gray = _gray_array(panel)
+    _, binary = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    candidates = []
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        if w < 16 or not (2 <= h <= 30) or w / max(h, 1) < 4:
+            continue
+        candidates.append((w, x + w / 2, y + h / 2))
+    if not candidates:
+        return None
+    if expected_pixels:
+        closest = min(candidates, key=lambda c: abs(c[0] - expected_pixels))
+        if abs(closest[0] - expected_pixels) <= expected_pixels * 0.35:
+            return closest
+    return max(candidates, key=lambda c: c[0])
+
+
+def _fuzzy_scale_candidates(tokens: list[OCRToken]) -> list[Measurement]:
+    """Parse garbled µm labels ('1Opm', '1p', 'Smm') as assumed-µm measurements."""
+    found: list[Measurement] = []
+    for token in tokens:
+        if ":" in token.text:  # never misread timestamps as measurements
+            continue
+        for match in _FUZZY_LABEL.finditer(token.text):
+            raw_value = (match.group(1)
+                         + ("." + match.group(2) if match.group(2) else "")
+                         ).translate(_FUZZY_DIGIT_FIX)
+            found.append(Measurement(
+                float(raw_value.replace(",", ".")), "um",
+                float(raw_value.replace(",", ".")),
+                token.confidence * 0.6, token.cx, token.cy, match.group(0)))
+    return found
+
+
+def bar_calibrated_fallback(panel: Image.Image, tokens: list[OCRToken],
+                            image_width: int) -> tuple[
+        float | None, float | None, float, list[str]]:
+    """Recover calibration from the original printed bar when OCR misses numbers.
+
+    The bar's pixel length plus any readable label gives an exact calibration
+    (HFW = width × label / bar_length); a printed magnification cross-check
+    rejects garbled labels because HFW × mag must equal one display width.
+    """
+    notes: list[str] = []
+    bar = detect_solid_bar(panel)
+    mag_info = parse_magnification(tokens)
+    if bar is None:
+        notes.append("Bar fallback found no solid original scale bar on the panel.")
+        return None, None, 0.0, notes
+    strict, _assumed = _measurements(tokens)
+    options = []
+    for cand in strict + _fuzzy_scale_candidates(tokens):
+        if cand.value_um <= 0:
+            continue
+        hfw_est = image_width * cand.value_um / bar[0]
+        fraction = cand.value_um / hfw_est
+        if not (0.02 <= fraction <= 0.45):
+            continue
+        validated = False
+        if mag_info:
+            mag, mag_conf = mag_info
+            if not (_MAG_DISPLAY_BAND[0] <= hfw_est * mag <= _MAG_DISPLAY_BAND[1]):
+                continue  # magnification contradicts this label reading
+            validated = True
+            base = cand.confidence * 0.5 + mag_conf * 0.5
+        else:
+            base = cand.confidence * 0.35
+        proximity = 1.0 - min(abs(cand.cy - bar[2]) / max(image_width * 0.05, 1.0), 1.0)
+        options.append((validated, base * (0.75 + 0.25 * proximity),
+                        cand.value_um, hfw_est, cand.raw))
+    if not options:
+        notes.append("Bar fallback found labels but none matched the printed magnification.")
+        return None, None, 0.0, notes
+    options.sort(key=lambda option: (option[0], option[1]), reverse=True)
+    validated, conf, value_um, hfw_um, raw = options[0]
+    confidence = round(min(conf + (0.25 if validated else 0.0), 0.9), 3)
+    notes.append(
+        f"HFW derived from the original bar ({bar[0]:.0f} px) and label '{raw}'"
+        + (" cross-checked against the printed magnification." if validated else "."))
+    return round(hfw_um, 3), value_um, confidence, notes
+
+
 def analyze(path: str | Path, run_ocr: bool = True, crop_y: int | None = None,
             allow_manual_fallback: bool = False) -> tuple[Image.Image, Analysis]:
     source = Path(path)
@@ -363,6 +480,15 @@ def analyze(path: str | Path, run_ocr: bool = True, crop_y: int | None = None,
             result.hfw_um, result.hfw_confidence = hfw.value_um, hfw.confidence
         if scale and not metadata_scale:
             result.scale_um, result.scale_confidence = scale.value_um, scale.confidence
+        if result.hfw_um is None:
+            fb_hfw, fb_scale, fb_conf, fb_notes = bar_calibrated_fallback(
+                footer, tokens, image.width)
+            result.warnings.extend(fb_notes)
+            if fb_hfw is not None:
+                result.hfw_um, result.hfw_confidence = fb_hfw, fb_conf
+                if fb_scale is not None and (result.scale_um is None
+                                             or result.scale_confidence < fb_conf):
+                    result.scale_um, result.scale_confidence = fb_scale, fb_conf
         expected = (image.width * result.scale_um / result.hfw_um
                     if result.hfw_um and result.scale_um else None)
         result.embedded_scale_pixels = detect_embedded_scale_pixels(footer, expected)

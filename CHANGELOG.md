@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.1.0 — 2026-08-22
+
+- Added automatic bar-length self-calibration for legacy footers that print no
+  HFW (older Zeiss/LEO style): the original scale bar is located, its garbled
+  µm label is parsed (`1Opm`, `1p`, `Smm`), and the pair is validated against
+  the printed magnification before HFW is derived from the bar length.
+
 ## 2.0.1 — 2026-07-18
 
 - Added a distinctive SEMfig microscope-and-scale-bar application icon.

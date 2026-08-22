@@ -4,9 +4,11 @@ from tempfile import TemporaryDirectory
 
 from PIL import Image, ImageDraw
 
-from sem_ready import (Analysis, EnhancementOptions, OCRToken, detect_panel_boundary,
-                       detect_embedded_scale_pixels, enhance_image, export,
-                       interpret_calibration, least_busy_corner, nice_scale_value, render)
+from sem_ready import (Analysis, EnhancementOptions, OCRToken, bar_calibrated_fallback,
+                       detect_panel_boundary, detect_embedded_scale_pixels,
+                       detect_solid_bar, enhance_image, export,
+                       interpret_calibration, least_busy_corner, nice_scale_value,
+                       parse_magnification, render)
 from cli import _parse_args, discover_inputs, load_overrides, override_for
 from figure_builder import build_figure
 
@@ -56,6 +58,44 @@ class SEMReadyTests(unittest.TestCase):
 
     def test_nice_scale_uses_publication_sequence(self):
         self.assertEqual(nice_scale_value(298), 50)
+
+    def test_parse_magnification(self):
+        tokens = [OCRToken("IITK", .9, 100, 10), OCRToken("x7,000", .84, 300, 12)]
+        self.assertEqual(parse_magnification(tokens), (7000.0, .84))
+        self.assertIsNone(parse_magnification([OCRToken("Vacc-20", .8, 50, 5)]))
+
+    def test_detect_solid_bar(self):
+        panel = Image.new("L", (400, 60), 10)
+        ImageDraw.Draw(panel).rectangle((150, 30, 256, 41), fill=255)
+        bar = detect_solid_bar(panel)
+        self.assertEqual(bar[0], 107)
+
+    def test_bar_fallback_recovers_hfw_without_hfw_text(self):
+        panel = Image.new("L", (400, 60), 10)
+        ImageDraw.Draw(panel).rectangle((150, 30, 256, 41), fill=255)
+        tokens = [OCRToken("X1,000", .71, 320, 15),
+                  OCRToken("1Opm", .59, 203, 36)]
+        hfw, scale, confidence, _ = bar_calibrated_fallback(panel, tokens, 1280)
+        self.assertEqual(scale, 10)
+        self.assertAlmostEqual(hfw, 1280 * 10 / 107, delta=0.1)
+        self.assertGreater(confidence, 0.4)
+
+    def test_bar_fallback_rejects_labels_contradicting_magnification(self):
+        panel = Image.new("L", (400, 60), 10)
+        ImageDraw.Draw(panel).rectangle((150, 30, 219, 41), fill=255)  # 70 px bar
+        tokens = [OCRToken("x6,500", .62, 320, 15),
+                  OCRToken("3m", .52, 340, 40)]  # wrong label for this mag
+        hfw, scale, _, _ = bar_calibrated_fallback(panel, tokens, 1280)
+        self.assertIsNone(hfw)
+        self.assertIsNone(scale)
+
+    def test_bar_fallback_accepts_bare_p_label(self):
+        panel = Image.new("L", (700, 60), 10)
+        ImageDraw.Draw(panel).rectangle((600, 30, 674, 41), fill=255)  # 75 px
+        tokens = [OCRToken("x7,000", .84, 200, 15), OCRToken("1p", .68, 637, 36)]
+        hfw, scale, _, _ = bar_calibrated_fallback(panel, tokens, 1280)
+        self.assertEqual(scale, 1)
+        self.assertAlmostEqual(hfw, 1280 / 75, delta=0.1)
 
     def test_publication_profile_downsamples_without_upscaling(self):
         with TemporaryDirectory() as folder:

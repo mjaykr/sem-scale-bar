@@ -257,6 +257,22 @@ python cli.py incoming --overrides-csv calibrations.csv
 
 Use `--no-ocr` only when HFW and scale values are supplied for every image.
 
+## Legacy footers without HFW text
+
+Older Zeiss/LEO-style footers print only a magnification and a scale bar; there is
+no HFW field, and OCR often garbles the µ glyph in the bar label (`1Opm`, `1p`,
+`Smm`). When OCR cannot supply HFW, SEMfig self-calibrates instead of failing:
+
+1. It measures the pixel length of the original solid white scale bar.
+2. It parses the garbled label as an assumed-µm value.
+3. It validates the pair against the printed magnification — on these
+   instruments HFW × mag always equals one display width (~119–127 mm), so
+   contradictory readings are rejected.
+4. HFW is derived exactly: `HFW = image_width × label / bar_pixels`.
+
+This recovery is reported in the batch warnings column. CSV overrides remain
+available for anything it cannot read.
+
 ## Output files
 
 For each exported image, SEMfig creates:
